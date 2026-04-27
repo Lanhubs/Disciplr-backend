@@ -1,5 +1,8 @@
 import request from 'supertest'
 import { app } from '../app.js'
+import { bootstrapApp } from '../app-bootstrap.js'
+import { generateAccessToken } from '../lib/auth-utils.js'
+import { UserRole } from '../types/user.js'
 
 type HeaderMap = Record<string, string | string[] | undefined>
 
@@ -8,10 +11,18 @@ interface HeaderContractOptions {
   expectPoweredByAbsent?: boolean
 }
 
+interface EndpointCase {
+  label: string
+  path: string
+  token?: string
+}
+
 const DEFAULT_HEADER_CONTRACT_OPTIONS: Required<HeaderContractOptions> = {
   expectFrameOptionsAbsent: true,
   expectPoweredByAbsent: true,
 }
+
+let bootstrapped = false
 
 function toHeaderValue(value: string | string[] | undefined): string {
   if (Array.isArray(value)) {
@@ -63,6 +74,13 @@ function assertHelmetHeaderContract(
 }
 
 describe('helmet security headers contract', () => {
+  beforeAll(() => {
+    if (!bootstrapped) {
+      bootstrapApp()
+      bootstrapped = true
+    }
+  })
+
   describe('helper contract behavior', () => {
     it('normalizes single and array header values', () => {
       expect(toHeaderValue('abc')).toBe('abc')
@@ -96,9 +114,41 @@ describe('helmet security headers contract', () => {
     })
   })
 
-  describe('baseline endpoint check', () => {
-    it('enforces helmet header contract for root endpoint', async () => {
-      const res = await request(app).get('/')
+  describe('representative endpoint matrix', () => {
+    const endpointCases: EndpointCase[] = [
+      {
+        label: 'root endpoint (unauthenticated)',
+        path: '/',
+      },
+      {
+        label: 'health endpoint (unauthenticated)',
+        path: '/api/health',
+      },
+      {
+        label: 'authenticated endpoint',
+        path: '/api/vaults',
+        token: generateAccessToken({
+          userId: 'helmet-user-1',
+          role: UserRole.USER,
+        }),
+      },
+      {
+        label: 'admin endpoint',
+        path: '/api/admin/audit-logs',
+        token: generateAccessToken({
+          userId: 'helmet-admin-1',
+          role: UserRole.ADMIN,
+        }),
+      },
+    ]
+
+    it.each(endpointCases)('enforces helmet header contract for $label', async ({ path, token }) => {
+      let req = request(app).get(path)
+      if (token) {
+        req = req.set('Authorization', `Bearer ${token}`)
+      }
+
+      const res = await req
       assertHelmetHeaderContract(res.headers as HeaderMap)
       expect(res.headers['x-timezone']).toBe('UTC')
     })
