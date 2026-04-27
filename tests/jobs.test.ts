@@ -108,6 +108,16 @@ describe('Jobs API', () => {
         expect(res.body).toHaveProperty('error')
       })
     }
+
+    it('POST /api/jobs/enqueue – 403 for USER role attempting deadline.check', async () => {
+      const res = await request(testApp)
+        .post('/api/jobs/enqueue')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send(validBodies['deadline.check'])
+
+      expect(res.status).toBe(403)
+      expect(res.body).toHaveProperty('error')
+    })
   })
 
   // -------------------------------------------------------------------------
@@ -185,7 +195,8 @@ describe('Jobs API', () => {
         .send([1, 2, 3])
         .expect(400)
 
-      expect(res.body.error).toMatch(/JSON object/i)
+      expect(res.body.error.code).toBe('VALIDATION_ERROR')
+      expect(res.body.error.fields.some((f: { path: string }) => f.path === 'root')).toBe(true)
     })
 
     it('returns 400 for an unknown job type', async () => {
@@ -195,7 +206,8 @@ describe('Jobs API', () => {
         .send({ type: 'unknown.job', payload: {} })
         .expect(400)
 
-      expect(res.body.error).toMatch(/invalid or missing job type/i)
+      expect(res.body.error.code).toBe('VALIDATION_ERROR')
+      expect(res.body.error.fields.some((f: { path: string }) => f.path === 'type')).toBe(true)
     })
 
     it('returns 400 when type is missing', async () => {
@@ -205,7 +217,8 @@ describe('Jobs API', () => {
         .send({ payload: { triggerSource: 'manual' } })
         .expect(400)
 
-      expect(res.body.error).toMatch(/invalid or missing job type/i)
+      expect(res.body.error.code).toBe('VALIDATION_ERROR')
+      expect(res.body.error.fields.some((f: { path: string }) => f.path === 'type')).toBe(true)
     })
 
     it('returns 400 for invalid notification.send payload (missing required fields)', async () => {
@@ -215,7 +228,9 @@ describe('Jobs API', () => {
         .send({ type: 'notification.send', payload: { recipient: 'x@x.com' } })
         .expect(400)
 
-      expect(res.body.error).toMatch(/invalid payload/i)
+      expect(res.body.error.code).toBe('VALIDATION_ERROR')
+      expect(res.body.error.fields.some((f: { path: string }) => f.path === 'payload.subject')).toBe(true)
+      expect(res.body.error.fields.some((f: { path: string }) => f.path === 'payload.body')).toBe(true)
     })
 
     it('returns 400 for invalid deadline.check payload (bad triggerSource)', async () => {
@@ -225,7 +240,8 @@ describe('Jobs API', () => {
         .send({ type: 'deadline.check', payload: { triggerSource: 'cron' } })
         .expect(400)
 
-      expect(res.body.error).toMatch(/invalid payload/i)
+      expect(res.body.error.code).toBe('VALIDATION_ERROR')
+      expect(res.body.error.fields.some((f: { path: string }) => f.path === 'payload.triggerSource')).toBe(true)
     })
 
     it('returns 400 for invalid oracle.call payload (missing oracle)', async () => {
@@ -235,7 +251,8 @@ describe('Jobs API', () => {
         .send({ type: 'oracle.call', payload: { symbol: 'XLM' } })
         .expect(400)
 
-      expect(res.body.error).toMatch(/invalid payload/i)
+      expect(res.body.error.code).toBe('VALIDATION_ERROR')
+      expect(res.body.error.fields.some((f: { path: string }) => f.path === 'payload.oracle')).toBe(true)
     })
 
     it('returns 400 for invalid analytics.recompute payload (bad scope)', async () => {
@@ -245,7 +262,8 @@ describe('Jobs API', () => {
         .send({ type: 'analytics.recompute', payload: { scope: 'everything' } })
         .expect(400)
 
-      expect(res.body.error).toMatch(/invalid payload/i)
+      expect(res.body.error.code).toBe('VALIDATION_ERROR')
+      expect(res.body.error.fields.some((f: { path: string }) => f.path === 'payload.scope')).toBe(true)
     })
 
     it('returns 400 for negative delayMs', async () => {
@@ -255,7 +273,8 @@ describe('Jobs API', () => {
         .send({ ...validBodies['deadline.check'], delayMs: -1 })
         .expect(400)
 
-      expect(res.body.error).toMatch(/delayMs/i)
+      expect(res.body.error.code).toBe('VALIDATION_ERROR')
+      expect(res.body.error.fields).toContainEqual(expect.objectContaining({ path: 'delayMs' }))
     })
 
     it('returns 400 for non-numeric delayMs', async () => {
@@ -265,7 +284,8 @@ describe('Jobs API', () => {
         .send({ ...validBodies['deadline.check'], delayMs: 'soon' })
         .expect(400)
 
-      expect(res.body.error).toMatch(/delayMs/i)
+      expect(res.body.error.code).toBe('VALIDATION_ERROR')
+      expect(res.body.error.fields).toContainEqual(expect.objectContaining({ path: 'delayMs' }))
     })
 
     it('returns 400 for maxAttempts below 1', async () => {
@@ -275,7 +295,8 @@ describe('Jobs API', () => {
         .send({ ...validBodies['deadline.check'], maxAttempts: 0 })
         .expect(400)
 
-      expect(res.body.error).toMatch(/maxAttempts/i)
+      expect(res.body.error.code).toBe('VALIDATION_ERROR')
+      expect(res.body.error.fields).toContainEqual(expect.objectContaining({ path: 'maxAttempts' }))
     })
 
     it('returns 400 for maxAttempts above 10', async () => {
@@ -285,7 +306,8 @@ describe('Jobs API', () => {
         .send({ ...validBodies['deadline.check'], maxAttempts: 11 })
         .expect(400)
 
-      expect(res.body.error).toMatch(/maxAttempts/i)
+      expect(res.body.error.code).toBe('VALIDATION_ERROR')
+      expect(res.body.error.fields).toContainEqual(expect.objectContaining({ path: 'maxAttempts' }))
     })
 
     it('returns 400 for non-integer maxAttempts', async () => {
@@ -295,7 +317,8 @@ describe('Jobs API', () => {
         .send({ ...validBodies['deadline.check'], maxAttempts: 2.5 })
         .expect(400)
 
-      expect(res.body.error).toMatch(/maxAttempts/i)
+      expect(res.body.error.code).toBe('VALIDATION_ERROR')
+      expect(res.body.error.fields).toContainEqual(expect.objectContaining({ path: 'maxAttempts' }))
     })
   })
 
