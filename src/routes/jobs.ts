@@ -7,6 +7,7 @@ import {
   type JobPayloadByType,
   type JobType,
 } from '../jobs/types.js'
+import { parseEnqueueOptions } from '../jobs/enqueueOptions.js'
 import { authenticate, authorize } from '../middleware/auth.js'
 import { strictRateLimiter } from '../middleware/rateLimiter.js'
 import { createAuditLog } from '../lib/audit-logs.js'
@@ -136,10 +137,10 @@ export const createJobsRouter = (jobSystem: BackgroundJobSystem, options: JobsRo
 
     try {
       const { payload, type } = parseResult.data
-      const options: EnqueueOptions = {
-        delayMs: parseResult.data.delayMs !== undefined ? Math.floor(parseResult.data.delayMs) : undefined,
+      const options: EnqueueOptions = parseEnqueueOptions({
+        delayMs: parseResult.data.delayMs,
         maxAttempts: parseResult.data.maxAttempts,
-      }
+      })
       const queuedJob = enqueueTypedJob(jobSystem, type, payload as JobPayloadByType[JobType], options)
 
       createAuditLog({
