@@ -37,7 +37,7 @@ function maskIp(ip: string): string {
 function sanitizeBody(body: any): any {
     if (!body || typeof body !== 'object') return body
 
-    const sensitiveFields = ['creator', 'successDestination', 'failureDestination']
+    const sensitiveFields = ['creator', 'successDestination', 'failureDestination', 'apiKey', 'secret', 'x-api-key']
     const sanitized = { ...body }
 
     for (const field of sensitiveFields) {
