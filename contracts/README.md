@@ -44,7 +44,21 @@ consumed by the backend event parser.
 # from the contracts/ directory
 stellar contract build
 cargo test
+
+# Check that the compiled contract stays within the allowed size budget
+# Fails if the .wasm artifact exceeds the 100KB budget (configurable via MAX_WASM_SIZE)
+bash build-size-check.sh
 ```
+
+### Wasm Size Budget Configuration
+
+To prevent accidental bloat in the smart contract, the `accountability_vault` includes a size budget check (`build-size-check.sh`) integrated into the CI pipeline.
+The default limit is set to **100,000 bytes** (~100KB).
+
+If you need to update this budget as the contract grows:
+1. Temporarily increase the budget locally by exporting the variable: `export MAX_WASM_SIZE=150000`
+2. Update the default value in `contracts/build-size-check.sh`
+3. Push the changes to update the CI limit.
 
 ## Backend integration
 
