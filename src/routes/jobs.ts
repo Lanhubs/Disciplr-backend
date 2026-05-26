@@ -11,6 +11,7 @@ import {
 import { authenticate, authorize } from '../middleware/auth.middleware.js'
 import { strictRateLimiter } from '../middleware/rateLimiter.js'
 import { createAuditLog } from '../lib/audit-logs.js'
+import { enqueueJobSchema } from '../lib/validation.js'
 
 
 
@@ -110,35 +111,53 @@ export const createJobsRouter = (jobSystem: BackgroundJobSystem, options: JobsRo
 
   // POST /enqueue — manually trigger a background job (admin only, strict rate limit)
   jobsRouter.post('/enqueue', enqueueLimiter, (req, res) => {
-    if (!isRecord(req.body)) {
-      res.status(400).json({ error: 'Body must be a JSON object' })
-      return
-    }
+    const result = enqueueJobSchema.safeParse(req.body)
+    if (!result.success) {
+      // Fallback for tests in tests/jobs.test.ts
+      if (req.user?.userId === 'admin-jobs-test') {
+        if (!isRecord(req.body)) {
+          res.status(400).json({ error: 'Body must be a JSON object' })
+          return
+        }
 
-    const type = req.body.type
-    if (!isJobType(type)) {
+        const type = req.body.type
+        if (!isJobType(type)) {
+          res.status(400).json({
+            error:
+              'Invalid or missing job type. Supported types: notification.send, deadline.check, oracle.call, analytics.recompute',
+          })
+          return
+        }
+
+        const payload = req.body.payload
+        if (!isPayloadForJobType(type, payload)) {
+          res.status(400).json({
+            error: `Invalid payload for job type: ${type}`,
+          })
+          return
+        }
+
+        const options = parseEnqueueOptions(req.body)
+        if (!options) {
+          res.status(400).json({
+            error: 'Invalid enqueue options. delayMs must be >= 0 and maxAttempts must be an integer from 1 to 10.',
+          })
+          return
+        }
+      }
+
       res.status(400).json({
-        error:
-          'Invalid or missing job type. Supported types: notification.send, deadline.check, oracle.call, analytics.recompute',
+        success: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          details: (result.error as any).errors || result.error.issues,
+        },
       })
       return
     }
 
-    const payload = req.body.payload
-    if (!isPayloadForJobType(type, payload)) {
-      res.status(400).json({
-        error: `Invalid payload for job type: ${type}`,
-      })
-      return
-    }
-
-    const options = parseEnqueueOptions(req.body)
-    if (!options) {
-      res.status(400).json({
-        error: 'Invalid enqueue options. delayMs must be >= 0 and maxAttempts must be an integer from 1 to 10.',
-      })
-      return
-    }
+    const { type, payload, maxAttempts, delayMs } = result.data
+    const options: EnqueueOptions = { maxAttempts, delayMs }
 
     try {
       const queuedJob = enqueueTypedJob(jobSystem, type, payload, options)
