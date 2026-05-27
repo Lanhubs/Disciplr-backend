@@ -37,6 +37,66 @@ export const getSorobanConfig = (): SorobanConfig | null => {
  */
 export const isSorobanSubmitEnabled = (): boolean => getSorobanConfig() !== null
 
+// ─── Internal helper for transaction submission ───────────────────────────────
+
+/**
+ * Common transaction submission logic shared by all contract methods.
+ * Handles prepare, sign, send, and poll for completion.
+ */
+async function submitTransaction(
+  config: SorobanConfig,
+  methodName: string,
+  scVals: any[],
+): Promise<{ txHash: string }> {
+  const {
+    Keypair,
+    Contract,
+    rpc: SorobanRpc,
+    TransactionBuilder,
+    nativeToScVal,
+    BASE_FEE,
+  } = await import('@stellar/stellar-sdk')
+
+  const server = new SorobanRpc.Server(config.rpcUrl)
+  const keypair = Keypair.fromSecret(config.secretKey)
+  const account = await server.getAccount(config.sourceAccount)
+
+  const contract = new Contract(config.contractId)
+  const callOp = contract.call(methodName, ...scVals)
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: config.networkPassphrase,
+  })
+    .addOperation(callOp)
+    .setTimeout(30)
+    .build()
+
+  const prepared = await server.prepareTransaction(tx)
+  prepared.sign(keypair)
+
+  const response = await server.sendTransaction(prepared)
+
+  if (response.status === 'ERROR') {
+    throw new Error(`Soroban sendTransaction failed: ${response.status}`)
+  }
+
+  let getResponse = await server.getTransaction(response.hash)
+  const maxAttempts = 30
+  let attempts = 0
+  while (getResponse.status === 'NOT_FOUND' && attempts < maxAttempts) {
+    await new Promise((r) => setTimeout(r, 1000))
+    getResponse = await server.getTransaction(response.hash)
+    attempts++
+  }
+
+  if (getResponse.status !== 'SUCCESS') {
+    throw new Error(`Soroban transaction did not succeed: ${getResponse.status}`)
+  }
+
+  return { txHash: response.hash }
+}
+
 // ─── Soroban SDK abstraction (mockable for tests) ───────────────────────────
 
 /**
@@ -45,6 +105,26 @@ export const isSorobanSubmitEnabled = (): boolean => getSorobanConfig() !== null
  */
 export interface SorobanClient {
   submitVaultCreation(
+    config: SorobanConfig,
+    args: Record<string, unknown>,
+  ): Promise<{ txHash: string }>
+  submitStake(
+    config: SorobanConfig,
+    args: Record<string, unknown>,
+  ): Promise<{ txHash: string }>
+  submitCheckIn(
+    config: SorobanConfig,
+    args: Record<string, unknown>,
+  ): Promise<{ txHash: string }>
+  submitSlash(
+    config: SorobanConfig,
+    args: Record<string, unknown>,
+  ): Promise<{ txHash: string }>
+  submitClaim(
+    config: SorobanConfig,
+    args: Record<string, unknown>,
+  ): Promise<{ txHash: string }>
+  submitWithdraw(
     config: SorobanConfig,
     args: Record<string, unknown>,
   ): Promise<{ txHash: string }>
@@ -57,64 +137,72 @@ export interface SorobanClient {
  */
 export const defaultSorobanClient: SorobanClient = {
   async submitVaultCreation(config, args) {
-    // Dynamic import keeps the top-level module lightweight and avoids
-    // breaking test suites that never exercise real submission.
-    const {
-      Keypair,
-      Contract,
-      rpc: SorobanRpc,
-      Networks,
-      TransactionBuilder,
-      nativeToScVal,
-      BASE_FEE,
-    } = await import('@stellar/stellar-sdk')
-
-    const server = new SorobanRpc.Server(config.rpcUrl)
-    const keypair = Keypair.fromSecret(config.secretKey)
-    const account = await server.getAccount(config.sourceAccount)
-
-    const contract = new Contract(config.contractId)
-    const callOp = contract.call(
+    const { nativeToScVal } = await import('@stellar/stellar-sdk')
+    return submitTransaction(
+      config,
       'create_vault',
-      nativeToScVal(args.vaultId, { type: 'string' }),
-      nativeToScVal(args.amount, { type: 'string' }),
-      nativeToScVal(args.verifier, { type: 'string' }),
-      nativeToScVal(args.successDestination, { type: 'string' }),
-      nativeToScVal(args.failureDestination, { type: 'string' }),
+      [
+        nativeToScVal(args.vaultId, { type: 'string' }),
+        nativeToScVal(args.amount, { type: 'string' }),
+        nativeToScVal(args.verifier, { type: 'string' }),
+        nativeToScVal(args.successDestination, { type: 'string' }),
+        nativeToScVal(args.failureDestination, { type: 'string' }),
+      ],
     )
+  },
 
-    const tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
-      networkPassphrase: config.networkPassphrase,
-    })
-      .addOperation(callOp)
-      .setTimeout(30)
-      .build()
+  async submitStake(config, args) {
+    const { nativeToScVal } = await import('@stellar/stellar-sdk')
+    return submitTransaction(
+      config,
+      'stake',
+      [
+        nativeToScVal(args.vaultId, { type: 'string' }),
+        nativeToScVal(args.amount, { type: 'string' }),
+      ],
+    )
+  },
 
-    const prepared = await server.prepareTransaction(tx)
-    prepared.sign(keypair)
+  async submitCheckIn(config, args) {
+    const { nativeToScVal } = await import('@stellar/stellar-sdk')
+    return submitTransaction(
+      config,
+      'check_in',
+      [
+        nativeToScVal(args.vaultId, { type: 'string' }),
+        nativeToScVal(args.milestoneId, { type: 'string' }),
+      ],
+    )
+  },
 
-    const response = await server.sendTransaction(prepared)
+  async submitSlash(config, args) {
+    const { nativeToScVal } = await import('@stellar/stellar-sdk')
+    return submitTransaction(
+      config,
+      'slash_on_miss',
+      [
+        nativeToScVal(args.vaultId, { type: 'string' }),
+        nativeToScVal(args.milestoneId, { type: 'string' }),
+      ],
+    )
+  },
 
-    if (response.status === 'ERROR') {
-      throw new Error(`Soroban sendTransaction failed: ${response.status}`)
-    }
+  async submitClaim(config, args) {
+    const { nativeToScVal } = await import('@stellar/stellar-sdk')
+    return submitTransaction(
+      config,
+      'claim',
+      [nativeToScVal(args.vaultId, { type: 'string' })],
+    )
+  },
 
-    // Poll for completion
-    let getResponse = await server.getTransaction(response.hash)
-    const maxAttempts = 30
-    let attempts = 0
-    while (getResponse.status === 'NOT_FOUND' && attempts < maxAttempts) {
-      await new Promise((r) => setTimeout(r, 1000))
-      getResponse = await server.getTransaction(response.hash)
-      attempts++
-    }
-
-    if (getResponse.status !== 'SUCCESS') {
-      throw new Error(`Soroban transaction did not succeed: ${getResponse.status}`)
-    }
-
-    return { txHash: response.hash }
+  async submitWithdraw(config, args) {
+    const { nativeToScVal } = await import('@stellar/stellar-sdk')
+    return submitTransaction(
+      config,
+      'withdraw',
+      [nativeToScVal(args.vaultId, { type: 'string' })],
+    )
   },
 }
 
@@ -175,6 +263,19 @@ const buildPayload = (
   }
 }
 
+// ─── Types for lifecycle method responses ───────────────────────────────────
+
+export interface VaultLifecycleResponse {
+  method: string
+  args: Record<string, unknown>
+  submission: {
+    attempted: boolean
+    status: 'success' | 'not_configured' | 'error'
+    txHash?: string
+    error?: string
+  }
+}
+
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 /**
@@ -195,7 +296,6 @@ export const buildVaultCreationPayload = async (
   const mode = input.onChain?.mode ?? 'build'
   const payload = buildPayload(input, vault)
 
-  // ── build mode: return signing payload for the client ────────────
   if (mode !== 'submit') {
     return {
       mode,
@@ -204,7 +304,6 @@ export const buildVaultCreationPayload = async (
     }
   }
 
-  // ── submit mode: check feature flag ──────────────────────────────
   const config = getSorobanConfig()
   if (!config) {
     log('warn', 'soroban.submit_not_configured', { vaultId: vault.id })
@@ -215,7 +314,6 @@ export const buildVaultCreationPayload = async (
     }
   }
 
-  // ── submit mode: real submission ─────────────────────────────────
   try {
     log('info', 'soroban.submit_start', { vaultId: vault.id })
     const { txHash } = await _client.submitVaultCreation(config, payload.args)
@@ -233,6 +331,214 @@ export const buildVaultCreationPayload = async (
     return {
       mode,
       payload,
+      submission: { attempted: true, status: 'error', error: message },
+    }
+  }
+}
+
+/**
+ * Submit a stake transaction for a vault.
+ * Returns not_configured if Soroban is not fully configured.
+ */
+export const submitStake = async (
+  vaultId: string,
+  amount: string,
+): Promise<VaultLifecycleResponse> => {
+  const config = getSorobanConfig()
+  const args = { vaultId, amount }
+
+  if (!config) {
+    log('warn', 'soroban.stake_not_configured', { vaultId })
+    return {
+      method: 'stake',
+      args,
+      submission: { attempted: true, status: 'not_configured' },
+    }
+  }
+
+  try {
+    log('info', 'soroban.stake_start', { vaultId })
+    const { txHash } = await _client.submitStake(config, args)
+    log('info', 'soroban.stake_success', { vaultId, txHash })
+
+    return {
+      method: 'stake',
+      args,
+      submission: { attempted: true, status: 'success', txHash },
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown stake error'
+    log('error', 'soroban.stake_error', { vaultId, error: message })
+
+    return {
+      method: 'stake',
+      args,
+      submission: { attempted: true, status: 'error', error: message },
+    }
+  }
+}
+
+/**
+ * Submit a check-in transaction for a vault milestone.
+ * Returns not_configured if Soroban is not fully configured.
+ */
+export const submitCheckIn = async (
+  vaultId: string,
+  milestoneId: string,
+): Promise<VaultLifecycleResponse> => {
+  const config = getSorobanConfig()
+  const args = { vaultId, milestoneId }
+
+  if (!config) {
+    log('warn', 'soroban.check_in_not_configured', { vaultId, milestoneId })
+    return {
+      method: 'check_in',
+      args,
+      submission: { attempted: true, status: 'not_configured' },
+    }
+  }
+
+  try {
+    log('info', 'soroban.check_in_start', { vaultId, milestoneId })
+    const { txHash } = await _client.submitCheckIn(config, args)
+    log('info', 'soroban.check_in_success', { vaultId, milestoneId, txHash })
+
+    return {
+      method: 'check_in',
+      args,
+      submission: { attempted: true, status: 'success', txHash },
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown check_in error'
+    log('error', 'soroban.check_in_error', { vaultId, milestoneId, error: message })
+
+    return {
+      method: 'check_in',
+      args,
+      submission: { attempted: true, status: 'error', error: message },
+    }
+  }
+}
+
+/**
+ * Submit a slash_on_miss transaction for a missed milestone.
+ * Returns not_configured if Soroban is not fully configured.
+ */
+export const submitSlash = async (
+  vaultId: string,
+  milestoneId: string,
+): Promise<VaultLifecycleResponse> => {
+  const config = getSorobanConfig()
+  const args = { vaultId, milestoneId }
+
+  if (!config) {
+    log('warn', 'soroban.slash_not_configured', { vaultId, milestoneId })
+    return {
+      method: 'slash_on_miss',
+      args,
+      submission: { attempted: true, status: 'not_configured' },
+    }
+  }
+
+  try {
+    log('info', 'soroban.slash_start', { vaultId, milestoneId })
+    const { txHash } = await _client.submitSlash(config, args)
+    log('info', 'soroban.slash_success', { vaultId, milestoneId, txHash })
+
+    return {
+      method: 'slash_on_miss',
+      args,
+      submission: { attempted: true, status: 'success', txHash },
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown slash error'
+    log('error', 'soroban.slash_error', { vaultId, milestoneId, error: message })
+
+    return {
+      method: 'slash_on_miss',
+      args,
+      submission: { attempted: true, status: 'error', error: message },
+    }
+  }
+}
+
+/**
+ * Submit a claim transaction for a completed vault.
+ * Returns not_configured if Soroban is not fully configured.
+ */
+export const submitClaim = async (
+  vaultId: string,
+): Promise<VaultLifecycleResponse> => {
+  const config = getSorobanConfig()
+  const args = { vaultId }
+
+  if (!config) {
+    log('warn', 'soroban.claim_not_configured', { vaultId })
+    return {
+      method: 'claim',
+      args,
+      submission: { attempted: true, status: 'not_configured' },
+    }
+  }
+
+  try {
+    log('info', 'soroban.claim_start', { vaultId })
+    const { txHash } = await _client.submitClaim(config, args)
+    log('info', 'soroban.claim_success', { vaultId, txHash })
+
+    return {
+      method: 'claim',
+      args,
+      submission: { attempted: true, status: 'success', txHash },
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown claim error'
+    log('error', 'soroban.claim_error', { vaultId, error: message })
+
+    return {
+      method: 'claim',
+      args,
+      submission: { attempted: true, status: 'error', error: message },
+    }
+  }
+}
+
+/**
+ * Submit a withdraw transaction to withdraw remaining funds.
+ * Returns not_configured if Soroban is not fully configured.
+ */
+export const submitWithdraw = async (
+  vaultId: string,
+): Promise<VaultLifecycleResponse> => {
+  const config = getSorobanConfig()
+  const args = { vaultId }
+
+  if (!config) {
+    log('warn', 'soroban.withdraw_not_configured', { vaultId })
+    return {
+      method: 'withdraw',
+      args,
+      submission: { attempted: true, status: 'not_configured' },
+    }
+  }
+
+  try {
+    log('info', 'soroban.withdraw_start', { vaultId })
+    const { txHash } = await _client.submitWithdraw(config, args)
+    log('info', 'soroban.withdraw_success', { vaultId, txHash })
+
+    return {
+      method: 'withdraw',
+      args,
+      submission: { attempted: true, status: 'success', txHash },
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown withdraw error'
+    log('error', 'soroban.withdraw_error', { vaultId, error: message })
+
+    return {
+      method: 'withdraw',
+      args,
       submission: { attempted: true, status: 'error', error: message },
     }
   }

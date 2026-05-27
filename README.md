@@ -242,6 +242,36 @@ Migration tooling is standardized with Knex and PostgreSQL.
 - Baseline migration: `db/migrations/20260225190000_initial_baseline.cjs`
 - Full process (authoring, rollout, rollback, CI/CD): `docs/database-migrations.md`
 
+### Soroban Smart Contract Integration
+
+The backend can submit transactions directly to Soroban smart contracts when configured with the following environment variables:
+
+- `SOROBAN_CONTRACT_ID` — The contract address for the accountability vault
+- `SOROBAN_NETWORK_PASSPHRASE` — Stellar network passphrase (e.g., "Test SDF Network ; September 2015")
+- `SOROBAN_SOURCE_ACCOUNT` — Source account public key for transactions
+- `SOROBAN_RPC_URL` — Soroban RPC endpoint URL
+- `SOROBAN_SECRET_KEY` — Secret key for signing transactions (keep secure)
+
+#### Vault Lifecycle Methods
+
+The `SorobanClient` provides the following methods to drive the full vault lifecycle:
+
+| Method | Arguments | Description |
+|---|---|---|
+| `submitVaultCreation` | `vaultId`, `amount`, `verifier`, `successDestination`, `failureDestination`, `milestones` | Creates a new accountability vault |
+| `submitStake` | `vaultId`, `amount` | Stakes tokens into an existing vault |
+| `submitCheckIn` | `vaultId`, `milestoneId` | Records completion of a milestone |
+| `submitSlash` | `vaultId`, `milestoneId` | Slashes funds for missed milestone |
+| `submitClaim` | `vaultId` | Claims released funds from completed vault |
+| `submitWithdraw` | `vaultId` | Withdraws remaining funds |
+
+All lifecycle methods return a `VaultLifecycleResponse` with:
+- `method`: The contract method called
+- `args`: The arguments passed
+- `submission`: Object containing `attempted`, `status` (`success`/`not_configured`/`error`), and optionally `txHash` or `error`
+
+The methods are feature-flagged: if Soroban is not fully configured, they return `status: 'not_configured'` instead of throwing errors.
+
 ```text
 disciplr-backend/
 ├── src/
