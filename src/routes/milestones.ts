@@ -78,10 +78,22 @@ milestonesRouter.patch('/:id/verify', authenticate, requireVerifier, (req: Reque
   res.json({ milestone: verified, vaultCompleted })
 })
 
+const EVIDENCE_HASH_RE = /^[0-9a-f]{32,128}$/i
+
 // POST /api/vaults/:vaultId/milestones/:id/validate
 milestonesRouter.post('/:id/validate', authenticate, requireVerifier, (req: Request, res: Response, next: NextFunction) => {
   const { vaultId, id } = req.params
   const validatorUserId = req.user!.userId
+  const { evidenceHash } = req.body as { evidenceHash?: string }
+
+  if (!evidenceHash || !evidenceHash.trim()) {
+    return next(AppError.badRequest('evidenceHash is required'))
+  }
+
+  const cleanEvidenceHash = evidenceHash.trim().toLowerCase()
+  if (!EVIDENCE_HASH_RE.test(cleanEvidenceHash)) {
+    return next(AppError.validation('evidenceHash must be a valid hex string (32–128 characters)'))
+  }
 
   const vault = vaults.find((v) => v.id === vaultId)
   if (!vault) {
@@ -93,7 +105,7 @@ milestonesRouter.post('/:id/validate', authenticate, requireVerifier, (req: Requ
     return next(AppError.notFound('Milestone not found'))
   }
 
-  const result = validateMilestone(id, validatorUserId)
+  const result = validateMilestone(id, validatorUserId, cleanEvidenceHash)
   if (!result.success) {
     if (result.error === 'Milestone already validated') {
       return next(AppError.conflict('Milestone already validated'))

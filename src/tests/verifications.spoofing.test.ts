@@ -28,6 +28,8 @@ jest.unstable_mockModule('../services/verifiers.js', () => ({
 
 const { verificationsRouter } = await import('../routes/verifications.js')
 
+const VALID_EVIDENCE_HASH = 'a'.repeat(64)
+
 describe('verification route spoofing protections', () => {
   const app = express()
   app.use(express.json())
@@ -44,6 +46,7 @@ describe('verification route spoofing protections', () => {
       verifierUserId: 'auth-verifier',
       targetId: 'target-1',
       result: 'approved',
+      evidenceHash: VALID_EVIDENCE_HASH,
       disputed: false,
       timestamp: new Date().toISOString(),
     })
@@ -55,9 +58,107 @@ describe('verification route spoofing protections', () => {
         userId: 'spoofed-verifier',
         targetId: 'target-1',
         result: 'approved',
+        evidenceHash: VALID_EVIDENCE_HASH,
       })
       .expect(201)
 
-    expect(mockRecordVerification).toHaveBeenCalledWith('auth-verifier', 'target-1', 'approved', false)
+    expect(mockRecordVerification).toHaveBeenCalledWith(
+      'auth-verifier',
+      'target-1',
+      'approved',
+      false,
+      VALID_EVIDENCE_HASH,
+    )
+  })
+})
+
+describe('evidenceHash validation', () => {
+  const app = express()
+  app.use(express.json())
+  app.use('/api/verifications', verificationsRouter)
+
+  beforeEach(() => {
+    mockRecordVerification.mockReset()
+  })
+
+  test('rejects request when evidenceHash is missing', async () => {
+    const res = await request(app)
+      .post('/api/verifications')
+      .send({ targetId: 'target-1', result: 'approved' })
+
+    expect(res.status).toBe(400)
+    expect(mockRecordVerification).not.toHaveBeenCalled()
+  })
+
+  test('rejects request when evidenceHash is empty string', async () => {
+    const res = await request(app)
+      .post('/api/verifications')
+      .send({ targetId: 'target-1', result: 'approved', evidenceHash: '   ' })
+
+    expect(res.status).toBe(400)
+    expect(mockRecordVerification).not.toHaveBeenCalled()
+  })
+
+  test('rejects evidenceHash that is too short', async () => {
+    const res = await request(app)
+      .post('/api/verifications')
+      .send({ targetId: 'target-1', result: 'approved', evidenceHash: 'abc123' })
+
+    expect(res.status).toBe(422)
+    expect(mockRecordVerification).not.toHaveBeenCalled()
+  })
+
+  test('rejects evidenceHash containing non-hex characters', async () => {
+    const res = await request(app)
+      .post('/api/verifications')
+      .send({ targetId: 'target-1', result: 'approved', evidenceHash: 'z'.repeat(64) })
+
+    expect(res.status).toBe(422)
+    expect(mockRecordVerification).not.toHaveBeenCalled()
+  })
+
+  test('accepts a valid 64-char SHA-256 hex evidenceHash', async () => {
+    mockRecordVerification.mockResolvedValue({
+      id: 'verification-2',
+      verifierUserId: 'auth-verifier',
+      targetId: 'target-2',
+      result: 'approved',
+      evidenceHash: VALID_EVIDENCE_HASH,
+      disputed: false,
+      timestamp: new Date().toISOString(),
+    })
+
+    const res = await request(app)
+      .post('/api/verifications')
+      .send({ targetId: 'target-2', result: 'approved', evidenceHash: VALID_EVIDENCE_HASH })
+
+    expect(res.status).toBe(201)
+    expect(res.body.verification.evidenceHash).toBe(VALID_EVIDENCE_HASH)
+  })
+
+  test('normalizes evidenceHash to lowercase before passing to service', async () => {
+    const upperHash = 'A'.repeat(64)
+    mockRecordVerification.mockResolvedValue({
+      id: 'verification-3',
+      verifierUserId: 'auth-verifier',
+      targetId: 'target-3',
+      result: 'approved',
+      evidenceHash: upperHash.toLowerCase(),
+      disputed: false,
+      timestamp: new Date().toISOString(),
+    })
+
+    await request(app)
+      .post('/api/verifications')
+      .send({ targetId: 'target-3', result: 'approved', evidenceHash: upperHash })
+      .expect(201)
+
+    expect(mockRecordVerification).toHaveBeenCalledWith(
+      'auth-verifier',
+      'target-3',
+      'approved',
+      false,
+      upperHash.toLowerCase(),
+    )
   })
 })
