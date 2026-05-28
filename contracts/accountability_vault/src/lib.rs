@@ -1,356 +1,236 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, log, symbol_short, Address, Env,
-    String, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, BytesN,
+    Env, Vec,
 };
 
-// ─── Storage keys ────────────────────────────────────────────────────────────
-//
-// "Vault"    — instance storage key for the Vault / VaultV1 struct.
-// "VaultVer" — instance storage key for the schema version sentinel (u32).
-//              Written by initialize() and migrate(); read by migrate() to
-//              detect the stored schema without touching the vault struct
-//              (Soroban XDR decoding is field-count strict — trying to decode
-//              a VaultV1 slot as Vault panics at the boundary).
+#[cfg(test)]
+mod test;
 
-// ─── Error codes ─────────────────────────────────────────────────────────────
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Milestone {
+    pub amount: i128,
+    pub verified: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Vault {
+    pub token: Address,
+    pub creator: Address,
+    pub verifier: Address,
+    pub success_destination: Address,
+    pub failure_destination: Address,
+    pub staked_amount: i128,
+    pub deadline: u64,
+    pub milestones: Vec<Milestone>,
+    pub settled: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Settlement {
+    pub success_amount: i128,
+    pub failure_amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone)]
+enum DataKey {
+    Vault(BytesN<32>),
+}
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
-pub enum VaultError {
-    AlreadyInitialized = 1,
-    NotInitialized = 2,
-    Unauthorized = 3,
+pub enum Error {
+    VaultAlreadyExists = 1,
+    VaultNotFound = 2,
+    EmptyMilestones = 3,
     InvalidAmount = 4,
-    InvalidDeadline = 5,
-    VaultExpired = 6,
-    VaultNotActive = 7,
-    MilestoneNotFound = 8,
-    MilestoneAlreadyValidated = 9,
-    InvalidMilestoneAmount = 10,
+    MilestoneSumMismatch = 5,
+    AmountOverflow = 6,
+    AlreadySettled = 7,
+    DeadlineNotPassed = 8,
+    MilestoneOutOfRange = 9,
 }
-
-// ─── Data types ──────────────────────────────────────────────────────────────
-
-/// Status of the accountability vault.
-///
-/// NOTE: Enum variants MUST NOT be reordered or removed — Soroban encodes
-/// enum variants by index. Append-only changes are safe; reordering or
-/// deletion will break on-chain storage decoding for existing instances.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum VaultStatus {
-    Draft = 0,
-    Active = 1,
-    Completed = 2,
-    Failed = 3,
-    Cancelled = 4,
-}
-
-/// A single milestone within the vault.
-///
-/// STORAGE LAYOUT CONTRACT:
-/// - Fields are encoded in declaration order by soroban-sdk.
-/// - New fields MUST be appended at the end.
-/// - Existing fields MUST NOT be reordered, renamed, or removed.
-/// - Adding a field is safe IF the decoder tolerates missing trailing fields
-///   (soroban-sdk does NOT — so a migration function must backfill).
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Milestone {
-    pub id: String,
-    pub title: String,
-    pub amount: i128,
-    pub due_date: u64,
-    pub validated: bool,
-    pub validated_at: u64,
-    pub validated_by: Address,
-}
-
-/// The core accountability vault struct persisted in contract storage.
-///
-/// STORAGE LAYOUT CONTRACT:
-/// - Fields are encoded in declaration order by soroban-sdk.
-/// - New fields MUST be appended at the end.
-/// - Existing fields MUST NOT be reordered, renamed, or removed.
-/// - The `version` field tracks the schema revision for migration logic.
-///
-/// ## Version history
-///
-/// | Version | Changes                                         |
-/// |---------|-------------------------------------------------|
-/// | 1       | Initial layout (all fields below `version`)     |
-/// | 2       | Added `description` field (append-only)          |
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Vault {
-    /// Schema version — always the first field.
-    pub version: u32,
-    /// Unique identifier for this vault.
-    pub vault_id: String,
-    /// Stellar address of the vault creator.
-    pub creator: Address,
-    /// Total locked amount in stroops.
-    pub amount: i128,
-    /// Unix timestamp when the vault becomes active.
-    pub start_date: u64,
-    /// Unix timestamp when the vault expires.
-    pub end_date: u64,
-    /// Address of the designated verifier.
-    pub verifier: Address,
-    /// Destination address on successful completion.
-    pub success_destination: Address,
-    /// Destination address on failure.
-    pub failure_destination: Address,
-    /// Current status of the vault.
-    pub status: VaultStatus,
-    /// Milestones attached to this vault.
-    pub milestones: Vec<Milestone>,
-    /// Creation timestamp.
-    pub created_at: u64,
-    // ── v2 fields (appended) ──────────────────────────────────────────
-    /// Optional description — added in schema v2.
-    pub description: String,
-}
-
-/// Legacy V1 vault layout — used by migration tests to verify that
-/// data written under the old schema can be decoded and upgraded.
-///
-/// This struct mirrors the original Vault layout WITHOUT the `description`
-/// field. It is intentionally kept in sync with the v1 column list so
-/// snapshot-based tests can round-trip pre-upgrade data.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VaultV1 {
-    pub version: u32,
-    pub vault_id: String,
-    pub creator: Address,
-    pub amount: i128,
-    pub start_date: u64,
-    pub end_date: u64,
-    pub verifier: Address,
-    pub success_destination: Address,
-    pub failure_destination: Address,
-    pub status: VaultStatus,
-    pub milestones: Vec<Milestone>,
-    pub created_at: u64,
-}
-
-// ─── Current schema version ──────────────────────────────────────────────────
-
-pub const CURRENT_VAULT_VERSION: u32 = 2;
-
-// ─── Contract implementation ─────────────────────────────────────────────────
 
 #[contract]
 pub struct AccountabilityVault;
 
 #[contractimpl]
 impl AccountabilityVault {
-    /// Initialize a new accountability vault.
-    pub fn initialize(
+    pub fn create_vault(
         env: Env,
-        vault_id: String,
+        vault_id: BytesN<32>,
+        token: Address,
         creator: Address,
-        amount: i128,
-        start_date: u64,
-        end_date: u64,
         verifier: Address,
         success_destination: Address,
         failure_destination: Address,
-        milestones: Vec<Milestone>,
-        description: String,
-    ) -> Result<(), VaultError> {
-        // Ensure caller is authorized
+        staked_amount: i128,
+        deadline: u64,
+        milestone_amounts: Vec<i128>,
+    ) {
         creator.require_auth();
 
-        // Guard: cannot re-initialize
-        if env.storage().instance().has(&symbol_short!("Vault")) {
-            return Err(VaultError::AlreadyInitialized);
+        if env.storage().persistent().has(&DataKey::Vault(vault_id.clone())) {
+            panic_with_error!(&env, Error::VaultAlreadyExists);
+        }
+        if staked_amount <= 0 {
+            panic_with_error!(&env, Error::InvalidAmount);
+        }
+        if milestone_amounts.is_empty() {
+            panic_with_error!(&env, Error::EmptyMilestones);
         }
 
-        if amount <= 0 {
-            return Err(VaultError::InvalidAmount);
+        let mut milestones = Vec::new(&env);
+        let mut total = 0_i128;
+        for amount in milestone_amounts.iter() {
+            if amount <= 0 {
+                panic_with_error!(&env, Error::InvalidAmount);
+            }
+            total = checked_add(&env, total, amount);
+            milestones.push_back(Milestone {
+                amount,
+                verified: false,
+            });
         }
 
-        if end_date <= start_date {
-            return Err(VaultError::InvalidDeadline);
+        if total != staked_amount {
+            panic_with_error!(&env, Error::MilestoneSumMismatch);
         }
+
+        token::Client::new(&env, &token).transfer(
+            &creator,
+            &env.current_contract_address(),
+            &staked_amount,
+        );
 
         let vault = Vault {
-            version: CURRENT_VAULT_VERSION,
-            vault_id,
+            token,
             creator,
-            amount,
-            start_date,
-            end_date,
             verifier,
             success_destination,
             failure_destination,
-            status: VaultStatus::Draft,
+            staked_amount,
+            deadline,
             milestones,
-            created_at: env.ledger().timestamp(),
-            description,
+            settled: false,
         };
-
-        env.storage().instance().set(&symbol_short!("Vault"), &vault);
-        // Write version sentinel so migrate() can probe the schema without
-        // decoding the vault struct (avoids XDR field-count panics).
         env.storage()
-            .instance()
-            .set(&symbol_short!("VaultVer"), &CURRENT_VAULT_VERSION);
-        log!(&env, "vault.initialized version={}", CURRENT_VAULT_VERSION);
-        Ok(())
+            .persistent()
+            .set(&DataKey::Vault(vault_id), &vault);
     }
 
-    /// Read the current vault state.
-    pub fn get_vault(env: Env) -> Result<Vault, VaultError> {
-        env.storage()
-            .instance()
-            .get(&symbol_short!("Vault"))
-            .ok_or(VaultError::NotInitialized)
+    pub fn verify_milestone(env: Env, vault_id: BytesN<32>, milestone_index: u32) {
+        let mut vault = read_vault(&env, &vault_id);
+        vault.verifier.require_auth();
+
+        if vault.settled {
+            panic_with_error!(&env, Error::AlreadySettled);
+        }
+
+        let mut milestone = vault
+            .milestones
+            .get(milestone_index)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::MilestoneOutOfRange));
+        milestone.verified = true;
+        vault.milestones.set(milestone_index, milestone);
+        write_vault(&env, &vault_id, &vault);
     }
 
-    /// Activate the vault (transition from Draft to Active).
-    pub fn activate(env: Env, caller: Address) -> Result<(), VaultError> {
-        caller.require_auth();
-        let mut vault: Vault = Self::get_vault(env.clone())?;
-
-        if vault.status != VaultStatus::Draft {
-            return Err(VaultError::VaultNotActive);
-        }
-
-        vault.status = VaultStatus::Active;
-        env.storage().instance().set(&symbol_short!("Vault"), &vault);
-        log!(&env, "vault.activated");
-        Ok(())
+    pub fn settlement(env: Env, vault_id: BytesN<32>) -> Settlement {
+        let vault = read_vault(&env, &vault_id);
+        settlement_for(&env, &vault)
     }
 
-    /// Validate a milestone by the designated verifier.
-    pub fn validate_milestone(
-        env: Env,
-        verifier: Address,
-        milestone_id: String,
-    ) -> Result<(), VaultError> {
-        verifier.require_auth();
-        let mut vault: Vault = Self::get_vault(env.clone())?;
-
-        if vault.status != VaultStatus::Active {
-            return Err(VaultError::VaultNotActive);
-        }
-
-        if verifier != vault.verifier {
-            return Err(VaultError::Unauthorized);
-        }
-
-        let mut found = false;
-        let mut new_milestones = Vec::new(&env);
-        let mut all_validated = true;
-
-        for i in 0..vault.milestones.len() {
-            let mut ms = vault.milestones.get(i).unwrap();
-            if ms.id == milestone_id {
-                if ms.validated {
-                    return Err(VaultError::MilestoneAlreadyValidated);
-                }
-                ms.validated = true;
-                ms.validated_at = env.ledger().timestamp();
-                ms.validated_by = verifier.clone();
-                found = true;
-            }
-            if !ms.validated {
-                all_validated = false;
-            }
-            new_milestones.push_back(ms);
-        }
-
-        if !found {
-            return Err(VaultError::MilestoneNotFound);
-        }
-
-        vault.milestones = new_milestones;
-
-        if all_validated {
-            vault.status = VaultStatus::Completed;
-            log!(&env, "vault.completed");
-        }
-
-        env.storage().instance().set(&symbol_short!("Vault"), &vault);
-        log!(&env, "milestone.validated");
-        Ok(())
+    pub fn claim(env: Env, vault_id: BytesN<32>) -> Settlement {
+        settle_after_deadline(env, vault_id)
     }
 
-    /// Return the current schema version.
-    pub fn version(_env: Env) -> u32 {
-        CURRENT_VAULT_VERSION
-    }
-
-    /// Migrate storage from a previous schema version to the current one.
-    /// This is the upgrade entry point called after a contract WASM upgrade.
-    ///
-    /// # Migration strategy
-    ///
-    /// `migrate()` first reads the lightweight `"VaultVer"` sentinel (a `u32`)
-    /// to determine the stored schema without touching the vault struct itself.
-    /// This is necessary because Soroban XDR decoding is **field-count strict**:
-    /// attempting to decode a 12-field `VaultV1` blob as the 13-field `Vault`
-    /// panics with `Error(Object, UnexpectedSize)`. The sentinel lets us choose
-    /// the right decoder before reading the vault.
-    ///
-    /// - **v1 → v2**: read `VaultV1`, write `Vault` with `description` defaulted
-    ///   to `""` and update the sentinel to `CURRENT_VAULT_VERSION`.
-    ///
-    /// Idempotent: calling `migrate()` when the sentinel already equals
-    /// `CURRENT_VAULT_VERSION` is a no-op that never mutates storage.
-    pub fn migrate(env: Env) -> Result<(), VaultError> {
-        let vault_key = symbol_short!("Vault");
-        let ver_key = symbol_short!("VaultVer");
-
-        // ── 1. Fast-path via version sentinel ────────────────────────────────
-        // The sentinel is a plain u32, safe to read regardless of vault layout.
-        if let Some(stored_ver) = env.storage().instance().get::<_, u32>(&ver_key) {
-            if stored_ver >= CURRENT_VAULT_VERSION {
-                log!(&env, "migrate: already at version={}", stored_ver);
-                return Ok(());
-            }
-            // stored_ver < CURRENT_VAULT_VERSION — fall through to upgrade.
-        }
-
-        // ── 2. v1 → v2 upgrade ──────────────────────────────────────────────
-        // Only reached when the sentinel is absent (legacy V1 on-chain data
-        // written before this harness) or < CURRENT_VAULT_VERSION.
-        // VaultV1 exactly mirrors the 12-field wire format for schema v1;
-        // decoding it panics only if the stored field count doesn't match —
-        // which is safe here because we verify the sentinel first.
-        if let Some(v1) = env.storage().instance().get::<_, VaultV1>(&vault_key) {
-            let upgraded = Vault {
-                version: CURRENT_VAULT_VERSION,
-                vault_id: v1.vault_id,
-                creator: v1.creator,
-                amount: v1.amount,
-                start_date: v1.start_date,
-                end_date: v1.end_date,
-                verifier: v1.verifier,
-                success_destination: v1.success_destination,
-                failure_destination: v1.failure_destination,
-                status: v1.status,
-                milestones: v1.milestones,
-                created_at: v1.created_at,
-                description: String::from_str(&env, ""),
-            };
-
-            env.storage().instance().set(&vault_key, &upgraded);
-            env.storage().instance().set(&ver_key, &CURRENT_VAULT_VERSION);
-            log!(&env, "migrate: upgraded v1 → v{}", CURRENT_VAULT_VERSION);
-            return Ok(());
-        }
-
-        // ── 3. Nothing stored — contract was never initialised ───────────────
-        Err(VaultError::NotInitialized)
+    pub fn slash_on_miss(env: Env, vault_id: BytesN<32>) -> Settlement {
+        settle_after_deadline(env, vault_id)
     }
 }
 
-#[cfg(test)]
-mod test;
+fn settle_after_deadline(env: Env, vault_id: BytesN<32>) -> Settlement {
+    let mut vault = read_vault(&env, &vault_id);
+
+    if vault.settled {
+        panic_with_error!(&env, Error::AlreadySettled);
+    }
+    if env.ledger().timestamp() < vault.deadline {
+        panic_with_error!(&env, Error::DeadlineNotPassed);
+    }
+
+    let settlement = settlement_for(&env, &vault);
+    let token_client = token::Client::new(&env, &vault.token);
+    let contract = env.current_contract_address();
+
+    if settlement.success_amount > 0 {
+        token_client.transfer(
+            &contract,
+            &vault.success_destination,
+            &settlement.success_amount,
+        );
+    }
+    if settlement.failure_amount > 0 {
+        token_client.transfer(
+            &contract,
+            &vault.failure_destination,
+            &settlement.failure_amount,
+        );
+    }
+
+    vault.settled = true;
+    write_vault(&env, &vault_id, &vault);
+    settlement
+}
+
+fn settlement_for(env: &Env, vault: &Vault) -> Settlement {
+    let mut success_amount = 0_i128;
+    let mut failure_amount = 0_i128;
+
+    for milestone in vault.milestones.iter() {
+        if milestone.amount <= 0 {
+            panic_with_error!(env, Error::InvalidAmount);
+        }
+
+        if milestone.verified {
+            success_amount = checked_add(env, success_amount, milestone.amount);
+        } else {
+            failure_amount = checked_add(env, failure_amount, milestone.amount);
+        }
+    }
+
+    let settled_total = checked_add(env, success_amount, failure_amount);
+    if settled_total != vault.staked_amount {
+        panic_with_error!(env, Error::MilestoneSumMismatch);
+    }
+
+    Settlement {
+        success_amount,
+        failure_amount,
+    }
+}
+
+fn read_vault(env: &Env, vault_id: &BytesN<32>) -> Vault {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Vault(vault_id.clone()))
+        .unwrap_or_else(|| panic_with_error!(env, Error::VaultNotFound))
+}
+
+fn write_vault(env: &Env, vault_id: &BytesN<32>, vault: &Vault) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::Vault(vault_id.clone()), vault);
+}
+
+fn checked_add(env: &Env, left: i128, right: i128) -> i128 {
+    left.checked_add(right)
+        .unwrap_or_else(|| panic_with_error!(env, Error::AmountOverflow))
+}
