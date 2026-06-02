@@ -15,6 +15,10 @@ This backend uses **Knex + PostgreSQL** for schema migrations.
 - Migration tracking table: `knex_migrations`
 - Connection source: `DATABASE_URL`
 
+## Migration ownership
+
+- **Owner**: Backend / Database team (Disciplr). For schema changes, open a PR targeting `db/migrations/` and request a review from `@Disciplr-Org/db`.
+
 ## Legacy SQL migration cleanup
 
 The legacy SQL files under `src/db/migrations/` are deprecated and no longer authoritative. All required schema changes are now tracked in `db/migrations/`.
