@@ -1,6 +1,7 @@
 import { NotificationProvider } from './provider.js'
 import { EmailNotificationProvider } from './email.provider.js'
 import { ConsoleNotificationProvider } from './console.provider.js'
+import { getEnv } from '../../config/index.js'
 
 export class NotificationService {
   private static providers: Record<string, NotificationProvider> = {
@@ -9,7 +10,7 @@ export class NotificationService {
   }
 
   static getProvider(name?: string): NotificationProvider {
-    const providerName = name || process.env.NOTIFICATION_PROVIDER || 'console'
+    const providerName = name || getEnv().NOTIFICATION_PROVIDER || 'console'
     const provider = this.providers[providerName]
     
     if (!provider) {

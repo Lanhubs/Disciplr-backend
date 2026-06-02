@@ -135,6 +135,7 @@ export const envSchema = z
 
     // ── Misc / Limits ───────────────────────────────────────────
     MAX_JSON_BODY_SIZE: z.string().default('500kb'),
+    NOTIFICATION_PROVIDER: z.string().optional(),
     HORIZON_LAG_THRESHOLD: nonNegativeInt(10),
     HORIZON_SHUTDOWN_TIMEOUT_MS: positiveInt(30_000),
   })
@@ -151,8 +152,22 @@ export const envSchema = z
 
 export type Env = z.infer<typeof envSchema>;
 
-/** Warnings emitted during validation (not hard failures). */
-export type EnvWarning = { variable: string; message: string };
+let _validated: Env | undefined;
+
+/**
+ * Return the validated env, throwing if `initEnv()` has not been called.
+ */
+export function getEnv(): Env {
+  if (!_validated) {
+    throw new Error('Environment not validated yet — call initEnv() first');
+  }
+  return _validated;
+}
+
+/** Reset internal state — exposed for tests only. */
+export function _resetEnvForTesting(): void {
+  _validated = undefined;
+}
 
 /**
  * Validate `process.env` against the schema.  On success the typed,
@@ -165,9 +180,11 @@ export type EnvWarning = { variable: string; message: string };
  *
  * @param env  Defaults to `process.env` — pass a custom record in tests.
  */
-export function validateEnv(
+export function initEnv(
   env: Record<string, string | undefined> = process.env,
 ): { env: Env; warnings: EnvWarning[] } {
+  if (_validated) return { env: _validated, warnings: [] };
+
   const result = envSchema.safeParse(env);
 
   if (!result.success) {
@@ -190,6 +207,7 @@ export function validateEnv(
   }
 
   const validated = result.data;
+  _validated = validated;
   const warnings: EnvWarning[] = [];
 
   // In production, insecure secret defaults are a misconfiguration worth
