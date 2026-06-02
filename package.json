@@ -41,7 +41,8 @@
     "pg": "^8.20.0",
     "pino": "^9.4.0",
     "prom-client": "^15.0.0",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "argon2": "^0.40.0"
   },
   "devDependencies": {
     "@asteasolutions/zod-to-openapi": "^8.5.0",
