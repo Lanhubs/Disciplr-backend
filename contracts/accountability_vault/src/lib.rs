@@ -66,6 +66,10 @@ pub enum VaultStatus {
     Failed = 3,
     /// Cancelled by the creator before activation.
     Cancelled = 4,
+    /// Admin hold: entered from Active by the admin (guardian). Blocks
+    /// `slash_on_miss` and `claim` until the admin resolves the dispute
+    /// back to `Active`, or directly to `Completed` or `Failed`.
+    Disputed = 5,
 }
 
 /// Verifier configuration for M-of-N milestone approval.
@@ -165,6 +169,8 @@ pub enum Error {
     InvalidThreshold = 21,
     /// `reclaim_after_settlement` was called while `staked` is non-zero.
     StakedRemaining = 22,
+    /// Operation rejected because the vault is in `Disputed` state.
+    VaultDisputed = 23,
 }
 
 #[contract]
@@ -519,6 +525,10 @@ impl AccountabilityVault {
     pub fn slash_on_miss(env: Env) -> Result<(), Error> {
         let mut vault: Vault = Self::load(&env)?;
 
+        // Check Disputed before NotActive so callers get the specific error code.
+        if vault.status == VaultStatus::Disputed {
+            return Err(Error::VaultDisputed);
+        }
         if vault.status != VaultStatus::Active {
             return Err(Error::NotActive);
         }
@@ -567,6 +577,10 @@ impl AccountabilityVault {
         caller.require_auth();
         let mut vault: Vault = Self::load(&env, &vault_id)?;
 
+        // Check Disputed before NotActive so callers get the specific error code.
+        if vault.status == VaultStatus::Disputed {
+            return Err(Error::VaultDisputed);
+        }
         if vault.status != VaultStatus::Active {
             return Err(Error::NotActive);
         }
@@ -742,6 +756,71 @@ impl AccountabilityVault {
             (String::from_str(&env, "vault_withdrawn"), creator),
             refunded,
         );
+        Ok(())
+    }
+
+    /// Transitions an `Active` vault into `Disputed`, blocking `slash_on_miss` and
+    /// `claim` until an admin resolves the dispute.
+    ///
+    /// Only the `guardian` address may call this. The vault must be `Active`.
+    pub fn admin_dispute(env: Env, vault_id: String, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+        let mut vault: Vault = Self::load(&env, &vault_id)?;
+
+        if admin != vault.guardian {
+            return Err(Error::Unauthorized);
+        }
+        if vault.status != VaultStatus::Active {
+            return Err(Error::NotActive);
+        }
+
+        vault.status = VaultStatus::Disputed;
+        let key = DataKey::Vault(vault_id);
+        env.storage().persistent().set(&key, &vault);
+        Self::extend_ttl(&env, &key);
+
+        env.events()
+            .publish((String::from_str(&env, "vault_disputed"), admin), ());
+        Ok(())
+    }
+
+    /// Resolves a `Disputed` vault to `Active`, `Completed`, or `Failed`.
+    ///
+    /// Only the `guardian` address may call this. `target` must be one of those
+    /// three statuses; any other value is rejected with `Error::NotActive`.
+    ///
+    /// Resolving to `Completed` or `Failed` is a terminal administrative decision
+    /// and does **not** trigger a token transfer — settlement still goes through
+    /// `claim` (for Completed) or `slash_on_miss` (for Failed) once the vault is
+    /// back in the appropriate resolved state.
+    pub fn admin_resolve(
+        env: Env,
+        vault_id: String,
+        admin: Address,
+        target: VaultStatus,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        let mut vault: Vault = Self::load(&env, &vault_id)?;
+
+        if admin != vault.guardian {
+            return Err(Error::Unauthorized);
+        }
+        if vault.status != VaultStatus::Disputed {
+            return Err(Error::VaultDisputed);
+        }
+
+        match target {
+            VaultStatus::Active | VaultStatus::Completed | VaultStatus::Failed => {}
+            _ => return Err(Error::NotActive),
+        }
+
+        vault.status = target;
+        let key = DataKey::Vault(vault_id);
+        env.storage().persistent().set(&key, &vault);
+        Self::extend_ttl(&env, &key);
+
+        env.events()
+            .publish((String::from_str(&env, "vault_dispute_resolved"), admin), target as u32);
         Ok(())
     }
 
