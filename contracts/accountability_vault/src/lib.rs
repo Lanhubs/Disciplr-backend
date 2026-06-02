@@ -675,30 +675,39 @@ impl AccountabilityVault {
         Ok(())
     }
 
-    /// Cancels an unfunded (`Draft`) vault, or refunds the creator if the vault
-    /// was funded but never activated against any milestone. Only the creator
-    /// may withdraw; vaults with any verified check-ins cannot be unwound.
-    ///
-    /// Checks-Effects-Interactions: vault state is updated and persisted BEFORE
-    /// the external token transfer for the active-vault refund path.
-    pub fn withdraw(env: Env, creator: Address) -> Result<(), Error> {
+    /// Cancels an unfunded (`Draft`) vault. Only the creator may cancel a
+    /// draft; this path does not transfer tokens and emits `vault_cancelled`.
+    pub fn cancel_vault(env: Env, vault_id: String, creator: Address) -> Result<(), Error> {
         creator.require_auth();
         let mut vault: Vault = Self::load(&env, &vault_id)?;
 
         if creator != vault.creator {
             return Err(Error::Unauthorized);
         }
-        if vault.status == VaultStatus::Draft {
-            vault.status = VaultStatus::Cancelled;
-            let key = DataKey::Vault(vault_id);
-            env.storage().persistent().set(&key, &vault);
-            Self::extend_ttl(&env, &key);
-
-            env.events()
-                .publish((String::from_str(&env, "vault_cancelled"), creator), 0i128);
-            return Ok(());
+        if vault.status != VaultStatus::Draft {
+            return Err(Error::NotDraft);
         }
 
+        vault.status = VaultStatus::Cancelled;
+        let key = DataKey::Vault(vault_id);
+        env.storage().persistent().set(&key, &vault);
+        Self::extend_ttl(&env, &key);
+
+        env.events()
+            .publish((String::from_str(&env, "vault_cancelled"), creator), 0i128);
+        Ok(())
+    }
+
+    /// Refunds the creator for an `Active` vault that was never checked-in.
+    /// This function is restricted to `Active` refund cases; callers that wish
+    /// to cancel a Draft should call `cancel_vault` instead.
+    pub fn withdraw(env: Env, vault_id: String, creator: Address) -> Result<(), Error> {
+        creator.require_auth();
+        let mut vault: Vault = Self::load(&env, &vault_id)?;
+
+        if creator != vault.creator {
+            return Err(Error::Unauthorized);
+        }
         if vault.status != VaultStatus::Active {
             return Err(Error::NotActive);
         }

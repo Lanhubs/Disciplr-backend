@@ -154,9 +154,23 @@ fn test_slash_on_miss() {
 #[test]
 fn test_withdraw_draft_cancels() {
     let s = setup(&[100], &[500]);
+    s.contract.cancel_vault(&s.vault_id, &s.creator);
+    let vault = s.contract.get_vault(&s.vault_id);
+    assert_eq!(vault.status, VaultStatus::Cancelled);
+}
+
+#[test]
+fn test_withdraw_active_refunds_creator() {
+    let s = setup(&[100], &[500]);
+    // Fund the vault and then call withdraw without any check-ins.
+    s.contract.stake(&s.vault_id, &s.creator);
+
     s.contract.withdraw(&s.vault_id, &s.creator);
     let vault = s.contract.get_vault(&s.vault_id);
     assert_eq!(vault.status, VaultStatus::Cancelled);
+
+    let token_client = token::Client::new(&s.env, &s.token);
+    assert_eq!(token_client.balance(&s.creator), 500);
 }
 
 #[test]
@@ -460,8 +474,9 @@ fn test_create_vault_invalid_threshold_exceeds_verifiers_fails() {
             verified: false,
         },
     ];
+    let vault_id = String::from_str(&env, "v1");
     contract.create_vault(
-        &creator, &verifier_set, &None, &token, &500, &success, &failure, &1_200,
+        &vault_id, &creator, &verifier_set, &None, &token, &500, &success, &failure, &1_200,
         &milestones, &guardian,
     );
 }
@@ -794,7 +809,7 @@ fn test_pause_blocks_withdraw_active() {
     s.contract.emergency_pause(&s.guardian);
 
     // Must fail with Paused.
-    s.contract.withdraw(&s.creator);
+    s.contract.withdraw(&s.vault_id, &s.creator);
 }
 
 #[test]
@@ -878,9 +893,9 @@ fn test_pause_does_not_block_draft_withdraw() {
     // Pause before staking (vault is still Draft).
     contract.emergency_pause(&guardian);
 
-    // Draft-path withdraw (cancel) must still succeed.
-    contract.withdraw(&creator);
-    let vault = contract.get_vault();
+    // Draft-path cancel must still succeed.
+    contract.cancel_vault(&vault_id, &creator);
+    let vault = contract.get_vault(&vault_id);
     assert_eq!(vault.status, VaultStatus::Cancelled);
 }
 

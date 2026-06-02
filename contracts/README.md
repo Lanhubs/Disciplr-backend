@@ -141,6 +141,21 @@ cd contracts/accountability_vault
 cargo test
 ```
 
+### Migration: API change (cancel_vault vs withdraw)
+
+- The contract API now exposes `cancel_vault(vault_id, creator)` for explicitly
+  cancelling an unfunded `Draft` vault. This path emits the `vault_cancelled`
+  event and performs no token transfers.
+- The `withdraw(vault_id, creator)` function has been restricted to the funded
+  `Active` refund case (vaults that were staked but never had any verified
+  check-ins). It performs a CEI-safe refund to the `creator` and emits
+  `vault_withdrawn`.
+- Backend callers must choose the appropriate method based on the vault's
+  current `status`: use `cancel_vault` for `Draft`, and `withdraw` for
+  `Active` refunding. The `vault_cancelled` topic and payload remain
+  compatible with the existing backend event parser.
+
+
 #### Formatting
 
 The workspace ships a `contracts/rustfmt.toml` config. Format all contract sources with:
