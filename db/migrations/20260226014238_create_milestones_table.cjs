@@ -2,11 +2,8 @@
  * @param { import("knex").Knex } knex
  * @returns { Promise<void> }
  */
-exports.up = async function (knex) {
-  // Choice: keep an idempotent implementation that creates the enum only if
-  // missing and creates the table if absent. This allows `migrate:latest` to
-  // succeed on fresh databases while avoiding duplicate CREATE TYPE errors.
-
+exports.up = async function(knex) {
+  // Ensure the enum exists only once (some earlier migrations may create it).
   await knex.raw(`
     DO $$
     BEGIN
@@ -41,7 +38,7 @@ exports.up = async function (knex) {
  * @param { import("knex").Knex } knex
  * @returns { Promise<void> }
  */
-exports.down = async function (knex) {
+exports.down = async function(knex) {
   // Drop table; do not forcibly drop the enum here to avoid removing it
   // when other migrations might rely on it. If desired, a separate cleanup
   // migration should remove the type when it's safe to do so.
