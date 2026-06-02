@@ -145,8 +145,20 @@ Testing
 # Run all tests
 cargo test
 
-# Run only decimals validation tests
-cargo test test_create_vault -- decimals
+#### Logs-enabled release profile
+
+The crate defines a `release-with-logs` profile in `contracts/Cargo.toml` that inherits
+from `release` and enables `debug-assertions`. This allows diagnostics to be compiled
+only for simulator-focused, release-mode builds while keeping the production `release`
+build log-free.
+
+```bash
+cd contracts/accountability_vault
+cargo test --profile release-with-logs
+cargo build --profile release-with-logs --target wasm32-unknown-unknown
+```
+
+### Migration: API change (cancel_vault vs withdraw)
 
 Deployment
 # Build
