@@ -1308,3 +1308,61 @@ fn test_gas_benchmarks_slash_on_miss_10_milestones() {
     assert!(slash_cpu < 900_000);
     assert!(slash_mem < 250_000);
 }
+
+#[test]
+fn test_slash_on_miss_timestamp_boundaries() {
+    let env = TestEnv::default();
+    let contract = AccountabilityVaultContract::new(&env);
+
+    let vault = Vault {
+        end_timestamp: 1000,
+        ..Default::default()
+    };
+
+    // Setup vault
+    contract.create_vault(&vault);
+
+    // === Exact Equality Test: Should NOT slash (DeadlineNotReached) ===
+    env.ledger().set_timestamp(1000); // end_timestamp
+    let result = contract.slash_on_miss(0);
+    assert_eq!(result, Err(ContractError::DeadlineNotReached));
+
+    // === After Deadline: Should slash ===
+    env.ledger().set_timestamp(1001); // end_timestamp + 1
+    let result = contract.slash_on_miss(0);
+    assert!(result.is_ok());
+
+    // === Before Deadline: Should NOT slash ===
+    env.ledger().set_timestamp(999); // end_timestamp - 1
+    let result = contract.slash_on_miss(0);
+    assert_eq!(result, Err(ContractError::DeadlineNotReached));
+}
+
+#[test]
+fn test_check_in_milestone_due_date_boundaries() {
+    let env = TestEnv::default();
+    let contract = AccountabilityVaultContract::new(&env);
+
+    let milestone = Milestone {
+        due_date: 2000,
+        ..Default::default()
+    };
+
+    // Setup
+    contract.add_milestone(&milestone);
+
+    // Exact equality - should succeed
+    env.ledger().set_timestamp(2000);
+    let result = contract.check_in(0);
+    assert!(result.is_ok());
+
+    // Before due date - should fail
+    env.ledger().set_timestamp(1999);
+    let result = contract.check_in(0);
+    assert_eq!(result, Err(ContractError::TooEarly));
+
+    // After due date - should still succeed (assuming allowed)
+    env.ledger().set_timestamp(2001);
+    let result = contract.check_in(0);
+    assert!(result.is_ok());
+}

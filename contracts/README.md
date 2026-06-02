@@ -218,3 +218,12 @@ Location: `accountability_vault/src/lib.rs` — `AccountabilityVault::reclaim_af
 ### License
 
 See main repository license file.
+
+## Accountability Vault - Key Behaviors
+
+### Timestamp Boundary Rules
+- `slash_on_miss`: 
+  - `env.ledger().timestamp() <= vault.end_timestamp` → Returns `DeadlineNotReached` (exact equality is **rejected**)
+  - `env.ledger().timestamp() > vault.end_timestamp` → Slash is executed
+- `check_in`:
+  - Exact equality (`timestamp == milestone.due_date`) is **allowed** and succeeds.
