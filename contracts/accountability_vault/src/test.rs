@@ -141,8 +141,115 @@ fn test_create_and_stake() {
     assert_eq!(token_client.balance(&s.creator), 0);
 }
 
+// ── #493: deterministic vault address derivation ──────────────────────────────
+//
+// The backend (src/services/soroban.ts) deploys one AccountabilityVault
+// contract per vault and must correlate the on-chain address to the off-chain
+// PersistedVault.id before the transaction is confirmed.
+//
+// Soroban derives contract addresses deterministically from (deployer, salt):
+//
+//   address = sha256("contract" || deployer_bytes || salt_bytes)
+//
+// This means the address can be predicted *before* deployment using:
+//   env.deployer().with_address(deployer, salt).deployed_address()
+//
+// Salt convention used by the backend:
+//   BytesN<32> = sha256(vault_id_string) — a 32-byte hash of the off-chain UUID
+//   (see src/services/soroban.ts: saltFromVaultId)
+//
+// These tests exercise and document the pattern so the backend deploy flow can
+// be validated and the address correlation logic can be unit-tested off-chain.
+
 #[test]
-fn test_abi_spec_snapshot() {
+fn test_deterministic_address_matches_deployed_address() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let deployer = Address::generate(&env);
+    // Salt derived from vault UUID — in production: sha256(vault_id).
+    let salt = BytesN::from_array(&env, &[0xdeu8; 32]);
+
+    // Step 1: predict the address BEFORE deployment.
+    let predicted = env
+        .deployer()
+        .with_address(deployer.clone(), salt.clone())
+        .deployed_address();
+
+    // Step 2: install the wasm and deploy at the deterministic address.
+    let wasm_hash = env.deployer().upload_contract_wasm(AccountabilityVault::WASM);
+    let deployed = env
+        .deployer()
+        .with_address(deployer, salt)
+        .deploy_v2::<()>(wasm_hash, ());
+
+    // The predicted and deployed addresses must match.
+    assert_eq!(predicted, deployed);
+}
+
+#[test]
+fn test_different_salts_yield_different_addresses() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let deployer = Address::generate(&env);
+    let salt_a = BytesN::from_array(&env, &[0xAAu8; 32]);
+    let salt_b = BytesN::from_array(&env, &[0xBBu8; 32]);
+
+    let addr_a = env
+        .deployer()
+        .with_address(deployer.clone(), salt_a)
+        .deployed_address();
+    let addr_b = env
+        .deployer()
+        .with_address(deployer, salt_b)
+        .deployed_address();
+
+    assert_ne!(addr_a, addr_b, "distinct salts must produce distinct addresses");
+}
+
+#[test]
+fn test_different_deployers_same_salt_yield_different_addresses() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let deployer_a = Address::generate(&env);
+    let deployer_b = Address::generate(&env);
+    let salt = BytesN::from_array(&env, &[0x42u8; 32]);
+
+    let addr_a = env
+        .deployer()
+        .with_address(deployer_a, salt.clone())
+        .deployed_address();
+    let addr_b = env
+        .deployer()
+        .with_address(deployer_b, salt)
+        .deployed_address();
+
+    assert_ne!(
+        addr_a, addr_b,
+        "same salt but different deployers must produce different addresses"
+    );
+}
+
+#[test]
+fn test_same_deployer_same_salt_is_idempotent() {
+    // Calling deployed_address() twice with identical inputs returns the same value.
+    let env = Env::default();
+    let deployer = Address::generate(&env);
+    let salt = BytesN::from_array(&env, &[0x01u8; 32]);
+
+    let addr_1 = env
+        .deployer()
+        .with_address(deployer.clone(), salt.clone())
+        .deployed_address();
+    let addr_2 = env
+        .deployer()
+        .with_address(deployer, salt)
+        .deployed_address();
+
+    assert_eq!(addr_1, addr_2, "deployed_address must be deterministic");
+}
     // Build a stable JSON representation of the contract ABI.
     let spec = json!({
         "name": "AccountabilityVault",

@@ -78,3 +78,41 @@ If you need to update this budget as the contract grows:
 (`src/services/horizonListener.ts`) and `src/services/eventParser.ts`
 ingest the events emitted by these functions to keep the off-chain vault state
 in sync.
+
+## Deterministic vault address derivation
+
+Each vault is deployed as its own contract instance. The address is derived
+deterministically from the deployer address and a 32-byte salt, so
+`src/services/soroban.ts` can correlate the on-chain address to the off-chain
+`PersistedVault.id` **before** the deploy transaction is confirmed.
+
+### Derivation formula
+
+```
+contract_address = sha256("contract" || deployer_bytes || salt_bytes)
+```
+
+This is Soroban's built-in CREATE2-style address scheme. It can be computed
+client-side using `env.deployer().with_address(deployer, salt).deployed_address()`
+in Rust tests, or via the Stellar SDK `Contract.fromAddress` / deployer helpers
+in TypeScript.
+
+### Salt convention (backend)
+
+```
+salt = sha256(vault_id)   // 32-byte hash of the off-chain UUID string
+```
+
+See `src/services/soroban.ts` → `saltFromVaultId`.
+
+### Properties
+
+| Property | Guarantee |
+|---|---|
+| Same `(deployer, salt)` | Always yields the same address |
+| Different `salt` | Different address (distinct vault UUIDs → distinct contracts) |
+| Different `deployer` | Different address (multi-tenant safe) |
+
+The test suite in `contracts/accountability_vault/src/test.rs`
+(`test_deterministic_address_*`) exercises all three properties and verifies
+that `deployed_address()` matches the address of the actually deployed contract.
