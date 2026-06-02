@@ -1,3 +1,14 @@
+# Contracts
+
+This folder contains smart contracts used by the Disciplr backend.
+
+## accountability_vault
+
+The `accountability_vault` contract caps the number of milestones accepted by `create_vault`.
+
+- `MAX_MILESTONES = 32`
+- `create_vault` rejects vault creation when `milestones.len() > MAX_MILESTONES`
+- This bound protects per-call CPU/storage budgets for loops like `claim`, `slash_on_miss`, and `withdraw`
 # Disciplr Smart Contracts
 
 This directory contains Soroban smart contracts for the Disciplr platform.
@@ -41,6 +52,30 @@ token::Client::new(&env, &token_addr).transfer(          // ← external call la
 );
 ```
 
+#### Withdraw Refund Semantics
+
+`withdraw` has two behaviours depending on vault state:
+
+| Vault state | Effect |
+|-------------|--------|
+| `Draft` | Vault transitions to `Cancelled`. No tokens are held, so no transfer occurs. |
+| `Active` (no verified check-ins) | Full `staked` amount is returned to the `creator`. Vault transitions to `Cancelled`. |
+
+For the `Active` path the contract guarantees:
+
+- **Creator balance restored** — the token balance of `creator` after `withdraw` equals the
+  balance before `stake` (i.e. the original minted/held amount is returned in full).
+- **Contract balance zeroed** — the contract holds no tokens after the refund; `vault.staked`
+  is set to `0` before the transfer (CEI) and the on-chain token balance drops to `0`.
+- **Blocked when paused** — if the guardian has called `emergency_pause`, `withdraw` on an
+  `Active` vault returns `Error::Paused`. Draft-vault cancellation is not affected.
+- **Blocked after any check-in** — if at least one milestone has been verified,
+  `withdraw` returns `Error::Unauthorized` to prevent unilateral fund recovery once
+  progress has been committed.
+
+These invariants are tested in `test_withdraw_active_refunds_creator` (balance round-trip)
+and `test_withdraw_active_paused_blocked` (pause guard).
+
 #### Emergency Pause (Guardian Role)
 
 A `guardian` address is set at `create_vault` time. The guardian may call:
@@ -64,6 +99,28 @@ addresses from the verifier set (or the optional oracle) have approved it.
 - The threshold must be ≥ 1 and ≤ `verifiers.len()`; otherwise `create_vault` returns
   `Error::InvalidThreshold`.
 
+#### Token Admin Balance Conservation
+
+The token admin account is only used in tests to mint initial balances to the creator and
+must not be debited or credited by vault lifecycle operations. Invariant tests assert that
+the token admin balance is unchanged across:
+
+- success path: `stake -> check_in -> claim`
+- slash path: `stake -> slash_on_miss`
+
+This guards against unintended mint/burn side effects during settlement flows.
+
+#### Terminal-State Rule: Cancelled Vaults Cannot Be Re-Staked
+
+Once a vault transitions to `Cancelled`, staking must remain permanently blocked. Regression
+tests lock this down for both cancellation entry points:
+
+- `cancel_vault` path (Draft cancellation)
+- `withdraw` path (Active refund cancellation)
+
+In both scenarios, a subsequent `stake` call must fail with `Error::NotDraft`. This preserves
+the lifecycle state machine and prevents reopening a terminal vault state.
+
 #### Evidence Hash Binding
 
 `check_in` accepts an `evidence_hash: BytesN<32>` parameter — a 32-byte digest (e.g.
@@ -85,10 +142,23 @@ env.events().publish(
 The backend `submitCheckIn(vaultId, milestoneId, evidenceHash)` passes the hex-encoded
 hash, which is decoded to `BytesN<32>` before calling the contract.
 
+#### Slash-to-Self Guard
+
+`create_vault` rejects any vault where `failure_destination` equals `creator`. Allowing a
+creator to designate themselves as the failure destination would nullify the accountability
+mechanism: a missed deadline would simply return the staked funds to the creator with no
+penalty. Such vaults are rejected at creation time with `Error::InvalidFailureDestination`.
+
+#### Deadline Horizon Cap
+
+`create_vault` rejects any `end_timestamp` more than 5 years (157,680,000 seconds) past the
+current ledger timestamp. Allowing deadlines decades or centuries in the future would lock
+persistent storage TTL guarantees indefinitely and pollute analytics with unrealistic vaults.
+The constant `MAX_DEADLINE_HORIZON` is defined in `lib.rs` and enforced at vault creation.
+
 ### Arithmetic Safety
 
-The `create_vault` function validates that milestone amounts are positive and sum exactly to
-the declared `amount`, rejecting mismatches with `Error::AmountMismatch`.
+The `create_vault` function validates that every individual milestone amount is strictly positive (`amount > 0`). If any milestone has an amount `<= 0`, the contract immediately rejects the transaction with `Error::InvalidAmount`, even if valid positive milestone amounts precede or follow it. The sum of all milestone amounts must also match the declared vault `amount` exactly, otherwise the transaction is rejected with `Error::AmountMismatch`.
 
 ### Checked Milestone Access
 
@@ -104,7 +174,7 @@ refactors continue to return typed contract errors instead of risking host-level
 | 1 | `AlreadyInitialized` | Vault storage already set |
 | 2 | `NotInitialized` | Vault not yet created |
 | 3 | `InvalidAmount` | Zero or negative amount |
-| 4 | `InvalidDeadline` | Deadline in the past or milestone exceeds vault end |
+| 4 | `InvalidDeadline` | Deadline in the past, exceeds vault end, or beyond 5-year horizon |
 | 5 | `NoMilestones` | Empty milestone list |
 | 6 | `NotDraft` | Expected Draft state |
 | 7 | `NotActive` | Expected Active state |
@@ -123,7 +193,11 @@ refactors continue to return typed contract errors instead of risking host-level
 | 20 | `NoVerifiers` | Empty verifier list |
 | 21 | `InvalidThreshold` | Threshold is 0 or exceeds verifier count |
 | 22 | `StakedRemaining` | Reclaim attempted while stake is non-zero |
+| 23 | `NotCreator` | Caller is not the vault creator |
+| 24 | `NotVerifier` | Caller is not a member of the verifier set |
+| 25 | `NotCreatorOrVerifier` | Caller is neither the creator nor a verifier |
 | 23 | `VaultDisputed` | Operation rejected because vault is in `Disputed` state |
+| 26 | `InvalidFailureDestination` | `failure_destination` equals `creator` |
 
 ### Performance & Gas Benchmarks
 
@@ -208,6 +282,18 @@ cd contracts/accountability_vault
 cargo test
 ```
 
+#### ABI Snapshot
+
+- Snapshot file: `contracts/accountability_vault/spec/AccountabilityVault.spec.json` — checked into the repo.
+- To regenerate the snapshot after intentional ABI changes, run the test which will overwrite the file when `UPDATE_SOROBAN_SPEC=1` is set:
+
+```bash
+cd contracts/accountability_vault
+UPDATE_SOROBAN_SPEC=1 cargo test test_abi_spec_snapshot -- --nocapture
+```
+
+Commit the updated JSON together with the contract changes so backend bindings can be reviewed.
+
 ### Migration: API change (cancel_vault vs withdraw)
 
 - The contract API now exposes `cancel_vault(vault_id, creator)` for explicitly
@@ -234,8 +320,22 @@ cargo fmt
 
 #### Lint
 
-The workspace enables `clippy::all` warnings via `[workspace.lints.clippy]` in
-`contracts/Cargo.toml`. Run clippy with warnings treated as errors:
+The workspace enforces a consistent quality bar via `[workspace.lints]` in
+`contracts/Cargo.toml`. Each member crate opts in with `lints.workspace = true`.
+
+**Rust lints:**
+
+| Lint | Level | Purpose |
+|------|-------|---------|
+| `rust_2024_compatibility` | warn | Surface future-edition breakage early |
+| `missing_docs` | warn | Require documentation on all public items |
+| `unsafe_code` | deny | Prohibit `unsafe` blocks in contract code |
+
+**Clippy categories:**
+
+`all`, `correctness`, `suspicious`, `complexity`, `perf`, `style` — all at `warn`.
+
+Run clippy with warnings treated as errors:
 
 ```bash
 cd contracts
