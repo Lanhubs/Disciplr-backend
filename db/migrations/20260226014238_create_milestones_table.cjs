@@ -14,7 +14,6 @@ exports.up = async function(knex) {
     $$;
   `);
 
-  // Create table using the existing enum type to avoid duplicate CREATE TYPE calls
   await knex.raw(`
     CREATE TABLE IF NOT EXISTS milestones (
       id VARCHAR(64) PRIMARY KEY,
