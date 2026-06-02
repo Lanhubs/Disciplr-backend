@@ -427,10 +427,14 @@ impl AccountabilityVault {
         if approvals.len() >= vault.approval_threshold {
             milestone.verified = true;
             vault.milestones.set(milestone_index, milestone);
-            env.storage()
-                .instance()
-                .set(&DataKey::CheckIn(milestone_index), &env.ledger().timestamp());
-            env.storage().instance().set(&DataKey::Vault, &vault);
+            // Store check‑in timestamp in persistent storage keyed by (vault_id, milestone_index)
+            let checkin_key = (DataKey::CheckIn(milestone_index), vault_id.clone());
+            env.storage().persistent().set(&checkin_key, &env.ledger().timestamp());
+            Self::extend_ttl(&env, &checkin_key);
+            // Persist updated vault state
+            let vault_key = DataKey::Vault(vault_id);
+            env.storage().persistent().set(&vault_key, &vault);
+            Self::extend_ttl(&env, &vault_key);
         }
 
         let source = if is_oracle {
