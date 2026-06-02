@@ -6,8 +6,10 @@ import { authenticate } from '../middleware/auth.js'
 import { revokeSession, revokeAllUserSessions } from '../services/session.js'
 import { requireJson } from '../middleware/requireJson.js'
 import { AppError } from '../middleware/errorHandler.js'
+import { AUTH_JSON_MAX_BYTES } from '../middleware/requestBodyLimits.js'
 
 export const authRouter = Router();
+const authJson = requireJson({ maxBytes: AUTH_JSON_MAX_BYTES });
 
 // ------------- Mock Users & Audit Logs Setup -------------
 type UserRole = "user" | "verifier" | "admin";
@@ -41,7 +43,7 @@ const upsertMockUser = (userId: string): MockUser => {
 
 // ------------- Endpoints -------------
 
-authRouter.post('/register', requireJson, async (req, res, next) => {
+authRouter.post('/register', authJson, async (req, res, next) => {
     const result = registerSchema.safeParse(req.body)
     if (!result.success) {
         return next(AppError.validation('Validation failed', result.error.format()))
@@ -55,7 +57,7 @@ authRouter.post('/register', requireJson, async (req, res, next) => {
     }
 })
 
-authRouter.post('/login', requireJson, async (req, res, next) => {
+authRouter.post('/login', authJson, async (req, res, next) => {
     // Support mock login if only userId is provided (from audit-logs feature branch)
     if (req.body.userId && !req.body.email && !req.body.password) {
         const { userId } = req.body as { userId: string }
@@ -97,7 +99,7 @@ authRouter.post('/login', requireJson, async (req, res, next) => {
     }
 })
 
-authRouter.post('/refresh', requireJson, async (req, res, next) => {
+authRouter.post('/refresh', authJson, async (req, res, next) => {
     const result = refreshSchema.safeParse(req.body)
     if (!result.success) {
         return next(AppError.validation('Validation failed', result.error.format()))
@@ -113,6 +115,7 @@ authRouter.post('/refresh', requireJson, async (req, res, next) => {
 
 authRouter.post(
   "/logout",
+  authJson,
   authenticate,
   async (req: Request, res: Response) => {
     // 1. AuthService refresh token logout
@@ -145,7 +148,7 @@ authRouter.post('/logout-all', authenticate, async (req: Request, res: Response,
   res.json({ message: "Successfully logged out from all devices" });
 });
 
-authRouter.post('/users/:id/role', async (req, res, next) => {
+authRouter.post('/users/:id/role', authJson, async (req, res, next) => {
   const actorRole = req.header('x-user-role')
   const actorId = req.header('x-user-id')
 
