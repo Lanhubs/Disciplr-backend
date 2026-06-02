@@ -64,6 +64,27 @@ addresses from the verifier set (or the optional oracle) have approved it.
 - The threshold must be ≥ 1 and ≤ `verifiers.len()`; otherwise `create_vault` returns
   `Error::InvalidThreshold`.
 
+#### Evidence Hash Binding
+
+`check_in` accepts an `evidence_hash: BytesN<32>` parameter — a 32-byte digest (e.g.
+SHA-256) of the off-chain evidence artifact (document, IPFS CID, etc.). When the
+approval threshold is reached, the hash is persisted alongside the check-in timestamp
+under `DataKey::CheckIn(index)` as a `(u64, BytesN<32>)` tuple and emitted in the
+`milestone_checked_in` event value so that the on-chain record is cryptographically bound
+to the off-chain evidence.
+
+```rust
+// event topics: ("milestone_checked_in", caller, source)
+// event value:  (milestone_index, evidence_hash)
+env.events().publish(
+    (String::from_str(&env, "milestone_checked_in"), caller, source),
+    (milestone_index, evidence_hash),
+);
+```
+
+The backend `submitCheckIn(vaultId, milestoneId, evidenceHash)` passes the hex-encoded
+hash, which is decoded to `BytesN<32>` before calling the contract.
+
 ### Arithmetic Safety
 
 The `create_vault` function validates that milestone amounts are positive and sum exactly to

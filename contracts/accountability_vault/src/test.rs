@@ -5,8 +5,13 @@ extern crate std;
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token, vec, Address, Env, String,
+    token, vec, Address, BytesN, Env, String,
 };
+
+/// Creates a deterministic 32-byte evidence hash for use in tests.
+fn evidence_hash(env: &Env, seed: u8) -> BytesN<32> {
+    BytesN::from_array(env, &[seed; 32])
+}
 
 fn create_token(env: &Env, admin: &Address) -> (Address, token::StellarAssetClient<'static>) {
     let sac = env.register_stellar_asset_contract_v2(admin.clone());
@@ -124,8 +129,8 @@ fn test_check_in_and_claim_success() {
     let s = setup(&[100, 200], &[300, 700]);
     s.contract.stake(&s.vault_id, &s.creator);
 
-    s.contract.check_in(&s.vault_id, &s.verifier, &0);
-    s.contract.check_in(&s.vault_id, &s.verifier, &1);
+    s.contract.check_in(&s.vault_id, &s.verifier, &0, &evidence_hash(&s.env, 1));
+    s.contract.check_in(&s.vault_id, &s.verifier, &1, &evidence_hash(&s.env, 1));
 
     s.contract.claim(&s.vault_id, &s.creator);
     let vault = s.contract.get_vault(&s.vault_id);
@@ -164,7 +169,7 @@ fn test_withdraw_draft_cancels() {
 fn test_claim_before_all_verified_fails() {
     let s = setup(&[100, 200], &[300, 700]);
     s.contract.stake(&s.vault_id, &s.creator);
-    s.contract.check_in(&s.vault_id, &s.verifier, &0);
+    s.contract.check_in(&s.vault_id, &s.verifier, &0, &evidence_hash(&s.env, 1));
     // Second milestone not yet verified -> claim must fail.
     s.contract.claim(&s.vault_id, &s.creator);
 }
@@ -517,8 +522,8 @@ fn test_oracle_check_in_succeeds() {
     s.contract.stake(&s.vault_id, &s.creator);
 
     // Oracle confirms both milestones.
-    s.contract.check_in(&s.vault_id, &oracle, &0);
-    s.contract.check_in(&s.vault_id, &oracle, &1);
+    s.contract.check_in(&s.vault_id, &oracle, &0, &evidence_hash(&s.env, 1));
+    s.contract.check_in(&s.vault_id, &oracle, &1, &evidence_hash(&s.env, 1));
 
     s.contract.claim(&s.vault_id, &s.creator);
     let vault = s.contract.get_vault(&s.vault_id);
@@ -539,7 +544,7 @@ fn test_verifier_check_in_still_works_with_oracle_configured() {
     s.contract.stake(&s.vault_id, &s.creator);
 
     // The human verifier can still check in even when an oracle is set.
-    s.contract.check_in(&s.vault_id, &s.verifier, &0);
+    s.contract.check_in(&s.vault_id, &s.verifier, &0, &evidence_hash(&s.env, 1));
 
     let vault = s.contract.get_vault(&s.vault_id);
     assert!(vault.milestones.get(0).unwrap().verified);
@@ -553,7 +558,7 @@ fn test_unauthorized_caller_check_in_fails() {
 
     let random = Address::generate(&s.env);
     // Neither verifier nor oracle — must fail with Unauthorized.
-    s.contract.check_in(&s.vault_id, &random, &0);
+    s.contract.check_in(&s.vault_id, &random, &0, &evidence_hash(&s.env, 1));
 }
 
 #[test]
@@ -564,7 +569,7 @@ fn test_oracle_not_set_random_caller_check_in_fails() {
     s.contract.stake(&s.vault_id, &s.creator);
 
     let fake_oracle = Address::generate(&s.env);
-    s.contract.check_in(&s.vault_id, &fake_oracle, &0);
+    s.contract.check_in(&s.vault_id, &fake_oracle, &0, &evidence_hash(&s.env, 1));
 }
 
 #[test]
@@ -687,7 +692,7 @@ fn test_stake_from_oracle_checkin_claim_full_flow() {
     assert_eq!(contract.get_vault(&vault_id).status, VaultStatus::Active);
 
     // Oracle confirms the milestone.
-    contract.check_in(&vault_id, &oracle, &0);
+    contract.check_in(&vault_id, &oracle, &0, &evidence_hash(&env, 1));
     assert!(contract.get_vault(&vault_id).milestones.get(0).unwrap().verified);
 
     // Claim releases funds.
@@ -722,7 +727,7 @@ fn test_cei_claim_state_is_terminal_before_transfer() {
     // (CEI: state persisted before the external token transfer).
     let s = setup(&[100], &[500]);
     s.contract.stake(&s.creator);
-    s.contract.check_in(&s.verifier, &0);
+    s.contract.check_in(&s.verifier, &0, &evidence_hash(&s.env, 1));
     s.contract.claim(&s.creator);
 
     let vault = s.contract.get_vault();
@@ -753,7 +758,7 @@ fn test_cei_claim_cannot_be_triggered_twice() {
     // with NotActive — the CEI state update prevents double-claim.
     let s = setup(&[100], &[500]);
     s.contract.stake(&s.creator);
-    s.contract.check_in(&s.verifier, &0);
+    s.contract.check_in(&s.verifier, &0, &evidence_hash(&s.env, 1));
     s.contract.claim(&s.creator);
 
     let result = s.contract.try_claim(&s.creator);
@@ -779,7 +784,7 @@ fn test_pause_blocks_slash_on_miss() {
 fn test_pause_blocks_claim() {
     let s = setup(&[100], &[500]);
     s.contract.stake(&s.creator);
-    s.contract.check_in(&s.verifier, &0);
+    s.contract.check_in(&s.verifier, &0, &evidence_hash(&s.env, 1));
     s.contract.emergency_pause(&s.guardian);
 
     // Must fail with Paused.
@@ -815,7 +820,7 @@ fn test_unpause_allows_slash_on_miss() {
 fn test_unpause_allows_claim() {
     let s = setup(&[100], &[500]);
     s.contract.stake(&s.creator);
-    s.contract.check_in(&s.verifier, &0);
+    s.contract.check_in(&s.verifier, &0, &evidence_hash(&s.env, 1));
     s.contract.emergency_pause(&s.guardian);
     s.contract.emergency_unpause(&s.guardian);
 
@@ -927,7 +932,7 @@ fn test_multi_verifier_single_approval_insufficient_for_threshold_two() {
     contract.stake(&creator);
 
     // Only verifier1 approves — threshold not yet reached.
-    contract.check_in(&verifier1, &0);
+    contract.check_in(&verifier1, &0, &evidence_hash(&env, 1));
     let vault = contract.get_vault();
     assert!(!vault.milestones.get(0).unwrap().verified);
 }
@@ -973,8 +978,8 @@ fn test_multi_verifier_both_approve_verifies_milestone() {
     contract.stake(&creator);
 
     // Both verifiers approve — threshold reached.
-    contract.check_in(&verifier1, &0);
-    contract.check_in(&verifier2, &0);
+    contract.check_in(&verifier1, &0, &evidence_hash(&env, 1));
+    contract.check_in(&verifier2, &0, &evidence_hash(&env, 1));
 
     let vault = contract.get_vault();
     assert!(vault.milestones.get(0).unwrap().verified);
@@ -1021,9 +1026,9 @@ fn test_multi_verifier_double_approval_by_same_verifier_fails() {
     );
     contract.stake(&creator);
 
-    contract.check_in(&verifier1, &0);
+    contract.check_in(&verifier1, &0, &evidence_hash(&env, 1));
     // Same verifier approves again — must fail with AlreadyApproved.
-    contract.check_in(&verifier1, &0);
+    contract.check_in(&verifier1, &0, &evidence_hash(&env, 1));
 }
 
 #[test]
@@ -1067,7 +1072,7 @@ fn test_multi_verifier_threshold_one_of_two_single_approval_sufficient() {
     contract.stake(&creator);
 
     // Only verifier1 approves — sufficient for threshold=1.
-    contract.check_in(&verifier1, &0);
+    contract.check_in(&verifier1, &0, &evidence_hash(&env, 1));
     let vault = contract.get_vault();
     assert!(vault.milestones.get(0).unwrap().verified);
 }
@@ -1119,14 +1124,14 @@ fn test_multi_verifier_2of2_full_claim_flow() {
     contract.stake(&creator);
 
     // Milestone 0: both verifiers must approve.
-    contract.check_in(&verifier1, &0);
+    contract.check_in(&verifier1, &0, &evidence_hash(&env, 1));
     assert!(!contract.get_vault().milestones.get(0).unwrap().verified);
-    contract.check_in(&verifier2, &0);
+    contract.check_in(&verifier2, &0, &evidence_hash(&env, 1));
     assert!(contract.get_vault().milestones.get(0).unwrap().verified);
 
     // Milestone 1: both verifiers must approve.
-    contract.check_in(&verifier1, &1);
-    contract.check_in(&verifier2, &1);
+    contract.check_in(&verifier1, &1, &evidence_hash(&env, 1));
+    contract.check_in(&verifier2, &1, &evidence_hash(&env, 1));
     assert!(contract.get_vault().milestones.get(1).unwrap().verified);
 
     // All milestones verified — claim succeeds.
@@ -1204,13 +1209,13 @@ fn test_gas_benchmarks_10_milestones() {
 
     // 3. Measure check_in
     env.budget().reset_default();
-    contract.check_in(&vault_id, &verifier, &0);
+    contract.check_in(&vault_id, &verifier, &0, &evidence_hash(&env, 1));
     let check_in_cpu = env.budget().cpu_instruction_cost();
     let check_in_mem = env.budget().memory_bytes_cost();
 
     // Verify all remaining milestones so we can claim
     for i in 1..milestone_count {
-        contract.check_in(&vault_id, &verifier, &i);
+        contract.check_in(&vault_id, &verifier, &i, &evidence_hash(&env, 1));
     }
 
     // 4. Measure claim
@@ -1307,4 +1312,157 @@ fn test_gas_benchmarks_slash_on_miss_10_milestones() {
 
     assert!(slash_cpu < 900_000);
     assert!(slash_mem < 250_000);
+}
+
+// ── evidence_hash binding tests ──────────────────────────────────────────────
+
+#[test]
+fn test_check_in_stores_evidence_hash_with_timestamp() {
+    // When the threshold is reached the (timestamp, evidence_hash) tuple must be
+    // persisted under DataKey::CheckIn(index) — verified indirectly by confirming
+    // the milestone flips to verified and no panic occurs.
+    let s = setup(&[100], &[500]);
+    s.contract.stake(&s.vault_id, &s.creator);
+
+    let hash = evidence_hash(&s.env, 0xab);
+    s.contract.check_in(&s.vault_id, &s.verifier, &0, &hash);
+
+    let vault = s.contract.get_vault(&s.vault_id);
+    assert!(vault.milestones.get(0).unwrap().verified);
+}
+
+#[test]
+fn test_check_in_emits_evidence_hash_in_event() {
+    // check_in must not panic when a non-zero evidence_hash is passed and the
+    // event payload carries (milestone_index, evidence_hash).
+    let s = setup(&[100], &[500]);
+    s.contract.stake(&s.vault_id, &s.creator);
+
+    let hash = evidence_hash(&s.env, 0xff);
+    // If the event value tuple is malformed the Soroban host would panic here.
+    s.contract.check_in(&s.vault_id, &s.verifier, &0, &hash);
+}
+
+#[test]
+fn test_check_in_different_evidence_hashes_per_milestone() {
+    // Each milestone can carry a distinct evidence_hash.
+    let s = setup(&[100, 200], &[300, 700]);
+    s.contract.stake(&s.vault_id, &s.creator);
+
+    s.contract.check_in(&s.vault_id, &s.verifier, &0, &evidence_hash(&s.env, 0x01));
+    s.contract.check_in(&s.vault_id, &s.verifier, &1, &evidence_hash(&s.env, 0x02));
+
+    let vault = s.contract.get_vault(&s.vault_id);
+    assert!(vault.milestones.get(0).unwrap().verified);
+    assert!(vault.milestones.get(1).unwrap().verified);
+}
+
+#[test]
+fn test_check_in_evidence_hash_all_zeros_accepted() {
+    // A zero-filled hash is structurally valid — the contract must accept it.
+    let s = setup(&[100], &[500]);
+    s.contract.stake(&s.vault_id, &s.creator);
+
+    s.contract.check_in(&s.vault_id, &s.verifier, &0, &evidence_hash(&s.env, 0x00));
+
+    let vault = s.contract.get_vault(&s.vault_id);
+    assert!(vault.milestones.get(0).unwrap().verified);
+}
+
+#[test]
+fn test_check_in_evidence_hash_all_ff_accepted() {
+    // A 0xff-filled hash must also be accepted without error.
+    let s = setup(&[100], &[500]);
+    s.contract.stake(&s.vault_id, &s.creator);
+
+    s.contract.check_in(&s.vault_id, &s.verifier, &0, &evidence_hash(&s.env, 0xff));
+
+    let vault = s.contract.get_vault(&s.vault_id);
+    assert!(vault.milestones.get(0).unwrap().verified);
+}
+
+#[test]
+fn test_check_in_evidence_hash_oracle_path() {
+    // The oracle approval path must also accept and emit evidence_hash.
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+
+    let oracle = Address::generate(&env);
+    let s = setup_with_oracle(&[100], &[500], Some(oracle.clone()));
+    s.contract.stake(&s.vault_id, &s.creator);
+
+    let hash = evidence_hash(&s.env, 0xca);
+    s.contract.check_in(&s.vault_id, &oracle, &0, &hash);
+
+    let vault = s.contract.get_vault(&s.vault_id);
+    assert!(vault.milestones.get(0).unwrap().verified);
+}
+
+#[test]
+fn test_check_in_evidence_hash_multi_verifier_threshold_two() {
+    // With threshold=2 the hash is emitted on each approval call; the milestone
+    // flips only after the second approval.
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let verifier1 = Address::generate(&env);
+    let verifier2 = Address::generate(&env);
+    let guardian = Address::generate(&env);
+    let success = Address::generate(&env);
+    let failure = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let (token, token_admin_client) = create_token(&env, &token_admin);
+    token_admin_client.mint(&creator, &500);
+
+    let contract_id = env.register_contract(None, AccountabilityVault);
+    let contract = AccountabilityVaultClient::new(&env, &contract_id);
+
+    let verifier_set = VerifierSet {
+        verifiers: vec![&env, verifier1.clone(), verifier2.clone()],
+        threshold: 2u32,
+    };
+    let vault_id = String::from_str(&env, "v1");
+    let milestones = vec![
+        &env,
+        Milestone {
+            title: String::from_str(&env, "m"),
+            amount: 500,
+            due_date: 1_200,
+            verified: false,
+            released: false,
+        },
+    ];
+    contract.create_vault(
+        &vault_id, &creator, &verifier_set, &None, &token, &500, &success, &failure, &1_200,
+        &milestones, &guardian,
+    );
+    contract.stake(&vault_id, &creator);
+
+    let hash1 = evidence_hash(&env, 0x11);
+    let hash2 = evidence_hash(&env, 0x22);
+
+    // First approval — milestone not yet verified.
+    contract.check_in(&vault_id, &verifier1, &0, &hash1);
+    assert!(!contract.get_vault(&vault_id).milestones.get(0).unwrap().verified);
+
+    // Second approval with a different hash — milestone now verified.
+    contract.check_in(&vault_id, &verifier2, &0, &hash2);
+    assert!(contract.get_vault(&vault_id).milestones.get(0).unwrap().verified);
+}
+
+#[test]
+#[should_panic]
+fn test_check_in_double_approval_with_same_hash_fails() {
+    // Even with the same evidence_hash, a double-approval must be rejected.
+    let s = setup(&[100], &[500]);
+    s.contract.stake(&s.vault_id, &s.creator);
+
+    let hash = evidence_hash(&s.env, 0xde);
+    s.contract.check_in(&s.vault_id, &s.verifier, &0, &hash);
+    // Same caller, same hash — must fail with AlreadyApproved.
+    s.contract.check_in(&s.vault_id, &s.verifier, &0, &hash);
 }

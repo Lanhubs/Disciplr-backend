@@ -260,13 +260,18 @@ export const createDefaultSorobanClient = (
   },
 
   async submitCheckIn(config, args) {
-    const { nativeToScVal } = await import('@stellar/stellar-sdk')
+    const { nativeToScVal, xdr } = await import('@stellar/stellar-sdk')
+    // evidence_hash is a 32-byte Buffer encoded as hex string from the backend.
+    const hashHex = args.evidenceHash as string
+    const hashBytes = Buffer.from(hashHex, 'hex')
+    const evidenceHashScVal = xdr.ScVal.scvBytes(hashBytes)
     return submitTransaction(
       config,
       'check_in',
       [
         nativeToScVal(args.vaultId, { type: 'string' }),
         nativeToScVal(args.milestoneId, { type: 'string' }),
+        evidenceHashScVal,
       ],
     )
   },
@@ -492,14 +497,18 @@ export const submitStake = async (
 
 /**
  * Submit a check-in transaction for a vault milestone.
+ * `evidenceHash` is a 64-character lowercase hex string (SHA-256 of off-chain evidence)
+ * that is passed to the contract's `check_in` as a `BytesN<32>` argument, binding the
+ * on-chain record to the off-chain evidence artifact.
  * Returns not_configured if Soroban is not fully configured.
  */
 export const submitCheckIn = async (
   vaultId: string,
   milestoneId: string,
+  evidenceHash: string,
 ): Promise<VaultLifecycleResponse> => {
   const config = getSorobanConfig()
-  const args = { vaultId, milestoneId }
+  const args = { vaultId, milestoneId, evidenceHash }
 
   if (!config) {
     log('warn', 'soroban.check_in_not_configured', { vaultId, milestoneId })

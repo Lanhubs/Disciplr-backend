@@ -37,7 +37,7 @@
 //!   (`"oracle"` vs `"verifier"`) is included in the emitted event for backend parsing.
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, Env, String, Vec,
+    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, String, Vec,
 };
 
 /// Storage keys for the contract.
@@ -373,11 +373,22 @@ impl AccountabilityVault {
     /// `Milestone.verified` once `approval_threshold` distinct approvals are
     /// accumulated.
     ///
+    /// `evidence_hash` is a 32-byte SHA-256 (or equivalent) digest of the
+    /// off-chain evidence artifact (e.g. IPFS CID hash, document hash). It is
+    /// stored alongside the check-in timestamp and emitted in the
+    /// `milestone_checked_in` event so that on-chain records are
+    /// cryptographically bound to off-chain evidence.
+    ///
     /// Double-approval by the same address is rejected with `Error::AlreadyApproved`.
     /// The emitted event includes a `source` topic (`"verifier"` or `"oracle"`) so
     /// the backend event parser can distinguish automated oracle confirmations from
     /// human verifier sign-offs.
-    pub fn check_in(env: Env, caller: Address, milestone_index: u32) -> Result<(), Error> {
+    pub fn check_in(
+        env: Env,
+        caller: Address,
+        milestone_index: u32,
+        evidence_hash: BytesN<32>,
+    ) -> Result<(), Error> {
         caller.require_auth();
         let mut vault: Vault = Self::load(&env, &vault_id)?;
 
@@ -427,9 +438,10 @@ impl AccountabilityVault {
         if approvals.len() >= vault.approval_threshold {
             milestone.verified = true;
             vault.milestones.set(milestone_index, milestone);
-            env.storage()
-                .instance()
-                .set(&DataKey::CheckIn(milestone_index), &env.ledger().timestamp());
+            env.storage().instance().set(
+                &DataKey::CheckIn(milestone_index),
+                &(env.ledger().timestamp(), evidence_hash.clone()),
+            );
             env.storage().instance().set(&DataKey::Vault, &vault);
         }
 
@@ -444,7 +456,7 @@ impl AccountabilityVault {
                 caller,
                 source,
             ),
-            milestone_index,
+            (milestone_index, evidence_hash),
         );
         Ok(())
     }
