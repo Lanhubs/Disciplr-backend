@@ -1,17 +1,22 @@
 #![no_std]
 //! Disciplr Accountability Vault
 //!
-//! A Soroban smart contract implementing programmable time-locked capital
-//! vaults for accountability staking. Vault creation is protected by a
-//! deployment-wide token allowlist so administrators can constrain funding to
-//! curated SEP-41 token contracts.
+//! A Soroban smart contract implementing programmable time-locked capital vaults
+//! for accountability staking. A creator stakes funds toward a goal with one or
+//! more milestones. A designated verifier set confirms check-ins / milestone
+//! completion via M-of-N threshold approval. On success the staked capital is
+//! released to the `success_destination`; on a missed deadline the capital is
+//! slashed to the `failure_destination` (e.g. a charity or forfeit address).
+//!
+//! Lifecycle: create_vault -> stake -> (check_in)* -> claim | slash_on_miss
+//! Funds movement is modeled via the SEP-41 token client (`stake`, `claim`,
+//! `slash_on_miss`, `withdraw`). The contract enforces the state machine,
+//! authorization, and deadline rules on-chain.
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, Env, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, BytesN,
+    Env, String, Symbol, Vec,
 };
-
-/// Upper bound for `create_vault` milestone count to keep per-call loops bounded.
-pub const MAX_MILESTONES: u32 = 32;
 
 /// Maximum allowed horizon between vault creation and its deadline.
 const MAX_DEADLINE_HORIZON: u64 = 5 * 365 * 24 * 60 * 60;
@@ -354,7 +359,62 @@ impl AccountabilityVault {
         Ok(())
     }
 
-    /// Releases all staked funds to the success destination once every milestone is verified.
+    /// Slashes the staked capital to the `failure_destination` once the vault
+    /// deadline has passed and not all milestones were verified. Permissionless:
+    /// anyone may trigger the slash after the deadline (e.g. a backend keeper).
+    ///
+    /// Checks-Effects-Interactions: vault status is set to `Failed` and `staked`
+    /// is zeroed in storage BEFORE the external token transfer is executed,
+    /// ensuring the terminal state is committed even if the transfer call panics.
+    pub fn slash_on_miss(env: Env, vault_id: String) -> Result<(), Error> {
+        let mut vault: Vault = Self::load(&env, &vault_id)?;
+
+        // Check Disputed before NotActive so callers get the specific error code.
+        if vault.status == VaultStatus::Disputed {
+            return Err(Error::VaultDisputed);
+        }
+        Self::assert_active(&vault)?;
+        if vault.paused {
+            return Err(Error::Paused);
+        }
+        if env.ledger().timestamp() <= vault.end_timestamp {
+            return Err(Error::DeadlineNotReached);
+        }
+        if Self::all_verified(&vault) {
+            return Err(Error::MilestonesIncomplete);
+        }
+
+        // CEI: capture transfer values, update and persist state, then call external token.
+        let slashed = vault.staked;
+        let failure_destination = vault.failure_destination.clone();
+        let token_addr = vault.token.clone();
+        vault.status = VaultStatus::Failed;
+        vault.staked = 0;
+        env.storage().instance().set(&DataKey::Vault(vault_id), &vault);
+
+        token::Client::new(&env, &token_addr).transfer(
+            &env.current_contract_address(),
+            &failure_destination,
+            &slashed,
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "vault_slashed"),
+                failure_destination,
+            ),
+            slashed,
+        );
+        Ok(())
+    }
+
+    /// Releases the staked capital to the `success_destination` once every
+    /// milestone has been verified. Callable by the creator or any member of
+    /// the verifier set.
+    ///
+    /// Checks-Effects-Interactions: vault status is set to `Completed` and
+    /// `staked` is zeroed in storage BEFORE the external token transfer,
+    /// ensuring the terminal state is committed even if the transfer call panics.
     pub fn claim(env: Env, vault_id: String, caller: Address) -> Result<(), Error> {
         caller.require_auth();
         let key = DataKey::Vault(vault_id);
@@ -364,10 +424,17 @@ impl AccountabilityVault {
             .get(&key)
             .ok_or(Error::NotInitialized)?;
 
-        if vault.status != VaultStatus::Active {
-            return Err(Error::NotActive);
+        // Check Disputed before NotActive so callers get the specific error code.
+        if vault.status == VaultStatus::Disputed {
+            return Err(Error::VaultDisputed);
         }
-        if caller != vault.creator && caller != vault.verifier {
+        Self::assert_active(&vault)?;
+        if vault.paused {
+            return Err(Error::Paused);
+        }
+        let is_authorized =
+            caller == vault.creator || vault.verifiers.iter().any(|v| v == caller);
+        if !is_authorized {
             return Err(Error::Unauthorized);
         }
         if !Self::all_verified(env.clone(), vault.milestones.clone()) {
@@ -417,9 +484,7 @@ impl AccountabilityVault {
         if creator != vault.creator {
             return Err(Error::Unauthorized);
         }
-        if vault.status != VaultStatus::Active {
-            return Err(Error::NotActive);
-        }
+        Self::assert_active(&vault)?;
         if vault.paused {
             return Err(Error::Paused);
         }
@@ -646,6 +711,14 @@ impl AccountabilityVault {
         
         Ok(())
     }
+    /// Asserts that the vault is in the Active state.
+    fn assert_active(vault: &Vault) -> Result<(), Error> {
+        if vault.status != VaultStatus::Active {
+            return Err(Error::NotActive);
+        }
+        Ok(())
+    }
+
     fn load(env: &Env, vault_id: &String) -> Result<Vault, Error> {
         let key = DataKey::Vault(vault_id.clone());
         let vault = env

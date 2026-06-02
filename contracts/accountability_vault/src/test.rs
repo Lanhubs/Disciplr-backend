@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 extern crate std;
 
 use super::*;
@@ -927,3 +929,12 @@ fn test_create_vault_failure_destination_equals_creator_fails() {
         &guardian,
     );
 }
+
+#[test]
+#[should_panic(expected = "Error::NotActive")]
+fn test_slash_on_miss_requires_active_vault_fails() {
+    let s = setup(&[100], &[500]);
+    // The vault is in Draft status — slash_on_miss must fail with NotActive.
+    s.contract.slash_on_miss(&s.vault_id);
+}
+
