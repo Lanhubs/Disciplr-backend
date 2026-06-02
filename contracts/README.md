@@ -22,22 +22,32 @@ Implements the vault lifecycle that the backend models off-chain in
 `src/services/vaultTransitions.ts` and parses events for in
 `src/services/eventParser.ts`:
 
-| Function        | Purpose                                                                                                                                                      |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `create_vault`  | Create a `Draft` vault with milestones, verifier, and success/failure destinations. Validates amount, deadline, and that milestone amounts sum to the total. |
-| `stake`         | Creator transfers the SEP-41 token into the contract; `Draft` -> `Active`.                                                                                   |
-| `check_in`      | Designated verifier confirms a milestone before its `due_date`.                                                                                              |
-| `slash_on_miss` | After the deadline with unverified milestones, slash funds to `failure_destination`; `Active` -> `Failed`.                                                   |
-| `claim`         | When all milestones are verified, release funds to `success_destination`; `Active` -> `Completed`.                                                           |
-| `withdraw`      | Cancel/refund an unfunded or unstarted vault to the creator; -> `Cancelled`.                                                                                 |
-| `get_vault`     | Read-only accessor for the current vault record.                                                                                                             |
+| Function | Purpose |
+|---|---|
+| `init` | Initialize the deployment admin that manages instance-level policy. Must be called once before allowlist administration. |
+| `set_admin` | Rotate the deployment admin. Only the current admin may call this. |
+| `set_allowed_token` | Add or remove a SEP-41 token contract from the instance-level allowlist used for new vaults. |
+| `is_allowed_token` | Read whether a token contract is currently allowed for new vault creation. |
+| `create_vault` | Create a `Draft` vault with milestones, verifier, token, and success/failure destinations. Validates amount, deadline, milestone sums, and that the requested token is allowlisted. |
+| `stake` | Creator transfers the SEP-41 token into the contract; `Draft` -> `Active`. |
+| `check_in` | Designated verifier confirms a milestone before its `due_date`. |
+| `slash_on_miss` | After the deadline with unverified milestones, slash funds to `failure_destination`; `Active` -> `Failed`. |
+| `claim` | When all milestones are verified, release funds to `success_destination`; `Active` -> `Completed`. |
+| `withdraw` | Cancel/refund an unfunded or unstarted vault to the creator; -> `Cancelled`. |
+| `get_vault` | Read-only accessor for the current vault record. |
 
-### Role-separation invariant
+### Token allowlist policy
 
-`create_vault` enforces that `creator != verifier`. Allowing the same address to
-fill both roles would let one party both stake funds *and* self-confirm milestones,
-completely undermining the accountability guarantee. Any attempt to create a vault
-where `creator == verifier` returns `Error::CreatorIsVerifier` (code 26).
+`accountability_vault` enforces a deployment-wide token allowlist at vault
+creation time. The admin initializes the contract with `init`, then uses
+`set_allowed_token(admin, token, true)` to permit curated SEP-41 token
+contracts (for example an XLM SAC or approved USDC contract) and
+`set_allowed_token(admin, token, false)` to remove them. `create_vault` checks
+the selected token against the instance-level `AllowedToken(token)` storage
+entry and returns `Error::TokenNotAllowed` when the token is absent or has been
+removed. Removing a token only blocks future vault creation; existing vault
+records retain their configured token so already-created vaults can continue
+their lifecycle.
 
 The `VaultStatus` enum (`Draft`/`Active`/`Completed`/`Failed`/`Cancelled`)
 mirrors `PersistedVault.status` in `src/types/vaults.ts`. Emitted events
