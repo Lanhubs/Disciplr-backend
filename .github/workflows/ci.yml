@@ -54,16 +54,26 @@ jobs:
         env:
           NODE_ENV: test
 
-  contracts-deny:
-    name: cargo-deny (contracts)
+  snapshot-check:
+    name: Ledger Snapshot Stability
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: cargo-deny check
-        uses: EmbarkStudios/cargo-deny-action@v2
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
         with:
-          manifest-path: contracts/Cargo.toml
-          command: check
-          arguments: --all-features
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/accountability_vault/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('contracts/accountability_vault/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Check snapshot stability
+        working-directory: contracts/accountability_vault
+        run: bash scripts/check_snapshots.sh
