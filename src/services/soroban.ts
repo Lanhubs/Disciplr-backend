@@ -1,4 +1,10 @@
-import type { CreateVaultInput, PersistedVault, VaultCreateResponse } from '../types/vaults.js'
+import type {
+  CreateVaultInput,
+  PersistedVault,
+  StakeInput,
+  StakeResponse,
+  VaultCreateResponse,
+} from '../types/vaults.js'
 
 const DEFAULT_CONTRACT_ID = 'CONTRACT_ID_NOT_CONFIGURED'
 const DEFAULT_SOURCE_ACCOUNT = 'SOURCE_ACCOUNT_NOT_CONFIGURED'
@@ -45,6 +51,11 @@ export const isSorobanSubmitEnabled = (): boolean => getSorobanConfig() !== null
  */
 export interface SorobanClient {
   submitVaultCreation(
+    config: SorobanConfig,
+    args: Record<string, unknown>,
+  ): Promise<{ txHash: string }>
+
+  submitStake(
     config: SorobanConfig,
     args: Record<string, unknown>,
   ): Promise<{ txHash: string }>
@@ -116,6 +127,62 @@ export const defaultSorobanClient: SorobanClient = {
 
     return { txHash: response.hash }
   },
+
+  async submitStake(config, args) {
+    const {
+      Keypair,
+      Contract,
+      rpc: SorobanRpc,
+      Networks,
+      TransactionBuilder,
+      nativeToScVal,
+      BASE_FEE,
+    } = await import('@stellar/stellar-sdk')
+
+    const server = new SorobanRpc.Server(config.rpcUrl)
+    const keypair = Keypair.fromSecret(config.secretKey)
+    const account = await server.getAccount(config.sourceAccount)
+
+    const contract = new Contract(config.contractId)
+    const callOp = contract.call(
+      'stake',
+      nativeToScVal(args.vaultId, { type: 'string' }),
+      nativeToScVal(args.amount, { type: 'string' }),
+      nativeToScVal(args.user, { type: 'string' }),
+    )
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: config.networkPassphrase,
+    })
+      .addOperation(callOp)
+      .setTimeout(30)
+      .build()
+
+    const prepared = await server.prepareTransaction(tx)
+    prepared.sign(keypair)
+
+    const response = await server.sendTransaction(prepared)
+
+    if (response.status === 'ERROR') {
+      throw new Error(`Soroban sendTransaction failed: ${response.status}`)
+    }
+
+    let getResponse = await server.getTransaction(response.hash)
+    const maxAttempts = 30
+    let attempts = 0
+    while (getResponse.status === 'NOT_FOUND' && attempts < maxAttempts) {
+      await new Promise((r) => setTimeout(r, 1000))
+      getResponse = await server.getTransaction(response.hash)
+      attempts++
+    }
+
+    if (getResponse.status !== 'SUCCESS') {
+      throw new Error(`Soroban transaction did not succeed: ${getResponse.status}`)
+    }
+
+    return { txHash: response.hash }
+  },
 }
 
 // Allow overriding the client (for tests)
@@ -127,6 +194,60 @@ export const setSorobanClient = (client: SorobanClient): void => {
 
 export const resetSorobanClient = (): void => {
   _client = defaultSorobanClient
+}
+
+/**
+ * Builds the on-chain payload for staking into a vault.
+ * Mirrors the same idempotent pattern as `buildVaultCreationPayload`:
+ * repeated calls with the same input produce identical payloads.
+ *
+ * Feature-flagged: real submission only occurs when Soroban env vars
+ * are fully configured.
+ */
+export const buildVaultStakePayload = async (
+  input: StakeInput,
+): Promise<StakeResponse> => {
+  const mode = input.onChain?.mode ?? 'build'
+  const payload = buildStakePayload(input)
+
+  if (mode !== 'submit') {
+    return {
+      mode,
+      payload,
+      submission: { attempted: false, status: 'not_requested' },
+    }
+  }
+
+  const config = getSorobanConfig()
+  if (!config) {
+    log('warn', 'soroban.submit_not_configured', { vaultId: input.vaultId })
+    return {
+      mode,
+      payload,
+      submission: { attempted: true, status: 'not_configured' },
+    }
+  }
+
+  try {
+    log('info', 'soroban.submit_start', { vaultId: input.vaultId })
+    const { txHash } = await _client.submitStake(config, payload.args)
+    log('info', 'soroban.submit_success', { vaultId: input.vaultId, txHash })
+
+    return {
+      mode,
+      payload,
+      submission: { attempted: true, status: 'success', txHash },
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown submission error'
+    log('error', 'soroban.submit_error', { vaultId: input.vaultId, error: message })
+
+    return {
+      mode,
+      payload,
+      submission: { attempted: true, status: 'error', error: message },
+    }
+  }
 }
 
 // ─── Structured logging helper (no PII) ─────────────────────────────────────
@@ -174,6 +295,23 @@ const buildPayload = (
     },
   }
 }
+
+// ─── Build stake payload ─────────────────────────────────────────────────────
+
+const buildStakePayload = (
+  input: StakeInput,
+): StakeResponse['payload'] => ({
+  contractId: input.onChain?.contractId ?? process.env.SOROBAN_CONTRACT_ID ?? DEFAULT_CONTRACT_ID,
+  networkPassphrase:
+    input.onChain?.networkPassphrase ?? process.env.SOROBAN_NETWORK_PASSPHRASE ?? 'Test SDF Network ; September 2015',
+  sourceAccount: input.onChain?.sourceAccount ?? process.env.SOROBAN_SOURCE_ACCOUNT ?? DEFAULT_SOURCE_ACCOUNT,
+  method: 'stake',
+  args: {
+    vaultId: input.vaultId,
+    amount: input.amount,
+    user: input.user,
+  },
+})
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 

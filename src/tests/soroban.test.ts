@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals'
-import type { CreateVaultInput, PersistedVault } from '../types/vaults.js'
+import type { CreateVaultInput, PersistedVault, StakeInput } from '../types/vaults.js'
 import {
   buildVaultCreationPayload,
+  buildVaultStakePayload,
   getSorobanConfig,
   isSorobanSubmitEnabled,
   setSorobanClient,
@@ -104,16 +105,25 @@ const restoreEnv = (): void => {
 const createMockClient = (
   result?: { txHash: string },
   error?: Error,
-): { client: SorobanClient; spy: jest.Mock<SorobanClient['submitVaultCreation']> } => {
-  const spy = jest.fn<SorobanClient['submitVaultCreation']>()
+): {
+  client: SorobanClient
+  creationSpy: jest.Mock<SorobanClient['submitVaultCreation']>
+  stakeSpy: jest.Mock<SorobanClient['submitStake']>
+} => {
+  const creationSpy = jest.fn<SorobanClient['submitVaultCreation']>()
+  const stakeSpy = jest.fn<SorobanClient['submitStake']>()
   if (error) {
-    spy.mockRejectedValue(error)
+    creationSpy.mockRejectedValue(error)
+    stakeSpy.mockRejectedValue(error)
   } else {
-    spy.mockResolvedValue(result ?? { txHash: 'mock-tx-hash-abc123' })
+    const defaultTx = result ?? { txHash: 'mock-tx-hash-abc123' }
+    creationSpy.mockResolvedValue(defaultTx)
+    stakeSpy.mockResolvedValue(defaultTx)
   }
   return {
-    client: { submitVaultCreation: spy },
-    spy,
+    client: { submitVaultCreation: creationSpy, submitStake: stakeSpy },
+    creationSpy,
+    stakeSpy,
   }
 }
 
@@ -272,7 +282,7 @@ describe('soroban service', () => {
 
     it('submits successfully and returns txHash', async () => {
       const expectedHash = 'tx-hash-from-soroban-network'
-      const { client, spy } = createMockClient({ txHash: expectedHash })
+      const { client, creationSpy } = createMockClient({ txHash: expectedHash })
       setSorobanClient(client)
 
       const input = makeInput({ onChain: { mode: 'submit' } })
@@ -287,8 +297,8 @@ describe('soroban service', () => {
       expect(result.submission.error).toBeUndefined()
 
       // Verify the mock client was called with the right config and args
-      expect(spy).toHaveBeenCalledTimes(1)
-      const [passedConfig, passedArgs] = spy.mock.calls[0] as [SorobanConfig, Record<string, any>]
+      expect(creationSpy).toHaveBeenCalledTimes(1)
+      const [passedConfig, passedArgs] = creationSpy.mock.calls[0] as [SorobanConfig, Record<string, any>]
       expect(passedConfig.contractId).toBe(FULL_ENV.SOROBAN_CONTRACT_ID)
       expect(passedConfig.secretKey).toBe(FULL_ENV.SOROBAN_SECRET_KEY)
       expect(passedArgs.vaultId).toBe(vault.id)
@@ -333,7 +343,7 @@ describe('soroban service', () => {
     })
 
     it('passes full config to the client including rpcUrl', async () => {
-      const { client, spy } = createMockClient()
+      const { client, creationSpy } = createMockClient()
       setSorobanClient(client)
 
       await buildVaultCreationPayload(
@@ -341,7 +351,7 @@ describe('soroban service', () => {
         makeVault(),
       )
 
-      const [passedConfig] = spy.mock.calls[0] as [SorobanConfig, any]
+      const [passedConfig] = creationSpy.mock.calls[0] as [SorobanConfig, any]
       expect(passedConfig.rpcUrl).toBe(FULL_ENV.SOROBAN_RPC_URL)
       expect(passedConfig.networkPassphrase).toBe(FULL_ENV.SOROBAN_NETWORK_PASSPHRASE)
     })
@@ -370,14 +380,14 @@ describe('soroban service', () => {
     })
 
     it('build mode calls never invoke the client', async () => {
-      const { client, spy } = createMockClient()
+      const { client, creationSpy } = createMockClient()
       setSorobanClient(client)
 
       const input = makeInput({ onChain: { mode: 'build' } })
       await buildVaultCreationPayload(input, makeVault())
       await buildVaultCreationPayload(input, makeVault())
 
-      expect(spy).not.toHaveBeenCalled()
+      expect(creationSpy).not.toHaveBeenCalled()
     })
   })
 
@@ -448,6 +458,210 @@ describe('soroban service', () => {
       expect(warnLog).toBeDefined()
 
       logSpy.mockRestore()
+    })
+  })
+
+  // ─── Stake idempotency ──────────────────────────────────────────
+  //
+  // The contract's `stake` method must be idempotent at the service
+  // layer: repeated calls with the same vault + user produce identical
+  // payloads, build mode never invokes the client, and the client
+  // receives consistent args on repeated submit calls.
+
+  const USER_A = stellar()
+  const USER_B = `G${'B'.repeat(55)}` // different address
+
+  const makeStakeInput = (overrides: Partial<StakeInput> = {}): StakeInput => ({
+    vaultId: 'vault-stake-id',
+    amount: '500',
+    user: USER_A,
+    ...overrides,
+  })
+
+  describe('buildVaultStakePayload (mode=build)', () => {
+    it('returns not_requested submission when mode is build', async () => {
+      const input = makeStakeInput()
+      const result = await buildVaultStakePayload(input)
+
+      expect(result.mode).toBe('build')
+      expect(result.payload.method).toBe('stake')
+      expect(result.submission.attempted).toBe(false)
+      expect(result.submission.status).toBe('not_requested')
+    })
+
+    it('defaults to build mode when onChain is undefined', async () => {
+      const input = makeStakeInput({ onChain: undefined })
+      const result = await buildVaultStakePayload(input)
+
+      expect(result.mode).toBe('build')
+      expect(result.submission.status).toBe('not_requested')
+    })
+
+    it('includes stake args in payload', async () => {
+      const input = makeStakeInput({ vaultId: 'vault-1', amount: '1000', user: USER_B })
+      const result = await buildVaultStakePayload(input)
+
+      expect(result.payload.args.vaultId).toBe('vault-1')
+      expect(result.payload.args.amount).toBe('1000')
+      expect(result.payload.args.user).toBe(USER_B)
+    })
+  })
+
+  describe('buildVaultStakePayload (mode=submit, not configured)', () => {
+    it('returns not_configured when env is incomplete', async () => {
+      const input = makeStakeInput({ onChain: { mode: 'submit' } })
+      const result = await buildVaultStakePayload(input)
+
+      expect(result.mode).toBe('submit')
+      expect(result.submission.attempted).toBe(true)
+      expect(result.submission.status).toBe('not_configured')
+    })
+
+    it('still includes the full payload even when not configured', async () => {
+      const input = makeStakeInput({ onChain: { mode: 'submit' } })
+      const result = await buildVaultStakePayload(input)
+
+      expect(result.payload.method).toBe('stake')
+      expect(result.payload.args.vaultId).toBe(input.vaultId)
+    })
+  })
+
+  describe('buildVaultStakePayload (mode=submit, configured)', () => {
+    beforeEach(() => {
+      setEnv(FULL_ENV)
+    })
+
+    it('submits successfully and returns txHash', async () => {
+      const expectedHash = 'stake-tx-hash'
+      const { client, stakeSpy } = createMockClient({ txHash: expectedHash })
+      setSorobanClient(client)
+
+      const input = makeStakeInput({ onChain: { mode: 'submit' } })
+      const result = await buildVaultStakePayload(input)
+
+      expect(result.mode).toBe('submit')
+      expect(result.submission.status).toBe('success')
+      expect(result.submission.txHash).toBe(expectedHash)
+
+      expect(stakeSpy).toHaveBeenCalledTimes(1)
+      const [passedConfig, passedArgs] = stakeSpy.mock.calls[0] as [SorobanConfig, Record<string, unknown>]
+      expect(passedConfig.contractId).toBe(FULL_ENV.SOROBAN_CONTRACT_ID)
+      expect(passedArgs.vaultId).toBe(input.vaultId)
+      expect(passedArgs.amount).toBe(input.amount)
+      expect(passedArgs.user).toBe(input.user)
+    })
+
+    it('returns error status when submission fails', async () => {
+      const { client } = createMockClient(undefined, new Error('Stake timeout'))
+      setSorobanClient(client)
+
+      const input = makeStakeInput({ onChain: { mode: 'submit' } })
+      const result = await buildVaultStakePayload(input)
+
+      expect(result.submission.status).toBe('error')
+      expect(result.submission.error).toBe('Stake timeout')
+    })
+
+    it('handles non-Error thrown values gracefully', async () => {
+      const stakeSpy = jest.fn<SorobanClient['submitStake']>().mockRejectedValue('string-error')
+      setSorobanClient({ submitVaultCreation: jest.fn() as any, submitStake: stakeSpy })
+
+      const input = makeStakeInput({ onChain: { mode: 'submit' } })
+      const result = await buildVaultStakePayload(input)
+
+      expect(result.submission.status).toBe('error')
+      expect(result.submission.error).toBe('Unknown submission error')
+    })
+
+    it('does not leak secret key or PII in the response', async () => {
+      const { client } = createMockClient()
+      setSorobanClient(client)
+
+      const input = makeStakeInput({ onChain: { mode: 'submit' } })
+      const result = await buildVaultStakePayload(input)
+
+      const serialized = JSON.stringify(result)
+      expect(serialized).not.toContain(FULL_ENV.SOROBAN_SECRET_KEY)
+    })
+
+    it('passes full config to the client including rpcUrl', async () => {
+      const { client, stakeSpy } = createMockClient()
+      setSorobanClient(client)
+
+      await buildVaultStakePayload(makeStakeInput({ onChain: { mode: 'submit' } }))
+
+      const [passedConfig] = stakeSpy.mock.calls[0] as [SorobanConfig, any]
+      expect(passedConfig.rpcUrl).toBe(FULL_ENV.SOROBAN_RPC_URL)
+    })
+  })
+
+  // ─── Stake idempotent client behaviour ─────────────────────────
+
+  describe('stake idempotent client behaviour', () => {
+    beforeEach(() => {
+      setEnv(FULL_ENV)
+    })
+
+    it('produces identical payload structure on repeated calls with same input', async () => {
+      const { client } = createMockClient({ txHash: 'stake-hash' })
+      setSorobanClient(client)
+
+      const input = makeStakeInput({ onChain: { mode: 'submit' } })
+
+      const result1 = await buildVaultStakePayload(input)
+      const result2 = await buildVaultStakePayload(input)
+
+      expect(result1.payload).toEqual(result2.payload)
+      expect(result1.mode).toBe(result2.mode)
+    })
+
+    it('build mode calls never invoke the client', async () => {
+      const { client, stakeSpy } = createMockClient()
+      setSorobanClient(client)
+
+      const input = makeStakeInput({ onChain: { mode: 'build' } })
+      await buildVaultStakePayload(input)
+      await buildVaultStakePayload(input)
+
+      expect(stakeSpy).not.toHaveBeenCalled()
+    })
+
+    it('submit mode calls the client exactly once per invocation', async () => {
+      const { client, stakeSpy } = createMockClient()
+      setSorobanClient(client)
+
+      const input = makeStakeInput({ onChain: { mode: 'submit' } })
+      await buildVaultStakePayload(input)
+      await buildVaultStakePayload(input)
+
+      // Each call triggers exactly one client invocation
+      expect(stakeSpy).toHaveBeenCalledTimes(2)
+    })
+
+    it('passes the same args on repeated submit calls', async () => {
+      const { client, stakeSpy } = createMockClient()
+      setSorobanClient(client)
+
+      const input = makeStakeInput({ onChain: { mode: 'submit' } })
+      await buildVaultStakePayload(input)
+      await buildVaultStakePayload(input)
+
+      const call1Args = stakeSpy.mock.calls[0][1] as Record<string, unknown>
+      const call2Args = stakeSpy.mock.calls[1][1] as Record<string, unknown>
+      expect(call1Args).toEqual(call2Args)
+    })
+
+    it('produces different payloads for different users on the same vault', async () => {
+      const inputA = makeStakeInput({ vaultId: 'vault-1', user: USER_A })
+      const inputB = makeStakeInput({ vaultId: 'vault-1', user: USER_B })
+
+      const resultA = await buildVaultStakePayload(inputA)
+      const resultB = await buildVaultStakePayload(inputB)
+
+      expect(resultA.payload.args.user).toBe(USER_A)
+      expect(resultB.payload.args.user).toBe(USER_B)
+      // Different user => different payload (expected — not a bug)
+      expect(resultA.payload.args).not.toEqual(resultB.payload.args)
     })
   })
 
