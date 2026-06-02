@@ -81,6 +81,21 @@ export const startExpirationChecker = (intervalMs = 60_000, jobSystem?: Backgrou
       await enqueueSlashJobs(expired, resolvedJobSystem)
     } catch (error) {
       console.error('[ExpirationChecker] Check failed:', error)
+    } finally {
+      try {
+        const now = new Date()
+        await db('scheduler_heartbeats')
+          .insert({
+            name: 'expiration_scheduler',
+            last_run_at: now,
+          })
+          .onConflict('name')
+          .merge({
+            last_run_at: now,
+          })
+      } catch (error) {
+        console.error('[ExpirationChecker] Failed to record heartbeat:', error)
+      }
     }
   }
 
