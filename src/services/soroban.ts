@@ -1,6 +1,6 @@
 import type { CreateVaultInput, PersistedVault, VaultCreateResponse } from '../types/vaults.js'
 import { retryWithBackoff, sleep, type RetryConfig } from '../utils/retry.js'
-import { AppError } from '../middleware/errorHandler.js'
+import { AppError, SorobanTimeoutError } from '../middleware/errorHandler.js'
 
 const DEFAULT_CONTRACT_ID = 'CONTRACT_ID_NOT_CONFIGURED'
 const DEFAULT_SOURCE_ACCOUNT = 'SOURCE_ACCOUNT_NOT_CONFIGURED'
@@ -25,6 +25,7 @@ export interface SorobanConfig {
   submitPollIntervalMs: number
   submitPollMaxAttempts: number
   rpcTimeoutMs: number
+  submitTimeoutMs: number
   submitRetry: RetryConfig
 }
 
@@ -69,6 +70,7 @@ export const getSorobanConfig = (): SorobanConfig | null => {
     submitPollIntervalMs: positiveIntFromEnv('SOROBAN_SUBMIT_POLL_INTERVAL_MS', DEFAULT_SUBMIT_POLL_INTERVAL_MS),
     submitPollMaxAttempts: positiveIntFromEnv('SOROBAN_SUBMIT_POLL_MAX_ATTEMPTS', DEFAULT_SUBMIT_POLL_MAX_ATTEMPTS),
     rpcTimeoutMs: positiveIntFromEnv('SOROBAN_RPC_TIMEOUT_MS', DEFAULT_RPC_TIMEOUT_MS),
+    submitTimeoutMs: positiveIntFromEnv('SOROBAN_SUBMIT_TIMEOUT_MS', 60_000),
     submitRetry: getSubmitRetryConfig(),
   }
 }
@@ -102,59 +104,51 @@ async function submitTransaction(
 
   const keypair = Keypair.fromSecret(config.secretKey)
   const contract = new Contract(config.contractId)
-  let lastError: Error | undefined
+  const callOp = contract.call(methodName, ...scVals)
 
-  for (const rpcUrl of config.rpcUrls) {
-    try {
-      log('info', 'soroban.using_rpc', { rpcUrl })
-      const server = new SorobanRpc.Server(rpcUrl)
-      
-      // Use the existing retry logic for this specific RPC URL
-      const result = await retryRpc('submit_transaction', config, async () => {
-        const account = await server.getAccount(config.sourceAccount)
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: config.networkPassphrase,
+  })
+    .addOperation(callOp)
+    .setTimeout(30)
+    .build()
 
-        const tx = new TransactionBuilder(account, {
-          fee: BASE_FEE,
-          networkPassphrase: config.networkPassphrase,
-        })
-          .addOperation(contract.call(methodName, ...scVals))
-          .setTimeout(30)
-          .build()
+  const prepared = await server.prepareTransaction(tx)
+  prepared.sign(keypair)
 
-        const prepared = await server.prepareTransaction(tx)
-        prepared.sign(keypair)
+  const response = await server.sendTransaction(prepared)
 
-        const response = await server.sendTransaction(prepared)
+  if (response.status === 'ERROR') {
+    throw new Error(`Soroban sendTransaction failed: ${response.status}`)
+  }
 
-        if (response.status === 'ERROR') {
-          throw new Error(`Soroban sendTransaction failed: ${response.status}`)
-        }
+  const deadline = Date.now() + config.submitTimeoutMs
+  const pollConfig: RetryConfig = {
+    maxAttempts: config.submitPollMaxAttempts,
+    initialBackoffMs: config.submitPollIntervalMs,
+    maxBackoffMs: config.submitPollIntervalMs,
+    backoffMultiplier: 1,
+    jitterFactor: 0,
+  }
 
-        let getResponse = await server.getTransaction(response.hash)
-        const maxAttempts = config.submitPollMaxAttempts || 30
-        let attempts = 0
-        while (getResponse.status === 'NOT_FOUND' && attempts < maxAttempts) {
-          await sleep(config.submitPollIntervalMs || 1000)
-          getResponse = await server.getTransaction(response.hash)
-          attempts++
-        }
-
-        if (getResponse.status !== 'SUCCESS') {
-          throw new Error(`Soroban transaction did not succeed: ${getResponse.status}`)
-        }
-
-        return { txHash: response.hash }
-      })
-
-      return result
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err))
-      lastError = error
-      log('warn', 'soroban.rpc_failed', { rpcUrl, error: error.message })
-      if (!isRetryableSorobanRpcError(error)) {
-        throw error
+  let getResponse = await retryWithBackoff(
+    async () => {
+      if (Date.now() >= deadline) {
+        throw new SorobanTimeoutError(response.hash, config.submitTimeoutMs)
       }
-    }
+      const result = await server.getTransaction(response.hash)
+      if (result.status === 'NOT_FOUND') {
+        throw Object.assign(new Error('transaction_pending'), { retryable: true })
+      }
+      return result
+    },
+    pollConfig,
+    (err) => !!(err as any).retryable,
+  )
+
+  if (getResponse.status !== 'SUCCESS') {
+    throw new Error(`Soroban transaction did not succeed: ${getResponse.status}`)
   }
 
   throw lastError || new Error('All RPC nodes failed')
@@ -348,6 +342,113 @@ export const setSorobanClient = (client: SorobanClient): void => {
 
 export const resetSorobanClient = (): void => {
   _client = defaultSorobanClient
+}
+
+/**
+ * Builds the on-chain payload for staking into a vault.
+ * Mirrors the same idempotent pattern as `buildVaultCreationPayload`:
+ * repeated calls with the same input produce identical payloads.
+ *
+ * Feature-flagged: real submission only occurs when Soroban env vars
+ * are fully configured.
+ */
+export const buildVaultStakePayload = async (
+  input: StakeInput,
+): Promise<StakeResponse> => {
+  const mode = input.onChain?.mode ?? 'build'
+  const payload = buildStakePayload(input)
+
+  if (mode !== 'submit') {
+    return {
+      mode,
+      payload,
+      submission: { attempted: false, status: 'not_requested' },
+    }
+  }
+
+  const config = getSorobanConfig()
+  if (!config) {
+    log('warn', 'soroban.submit_not_configured', { vaultId: input.vaultId })
+    return {
+      mode,
+      payload,
+      submission: { attempted: true, status: 'not_configured' },
+    }
+  }
+
+  try {
+    log('info', 'soroban.submit_start', { vaultId: input.vaultId })
+    const { txHash } = await _client.submitStake(config, payload.args)
+    log('info', 'soroban.submit_success', { vaultId: input.vaultId, txHash })
+
+    return {
+      mode,
+      payload,
+      submission: { attempted: true, status: 'success', txHash },
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown submission error'
+    log('error', 'soroban.submit_error', { vaultId: input.vaultId, error: message })
+
+    return {
+      mode,
+      payload,
+      submission: { attempted: true, status: 'error', error: message },
+    }
+  }
+}
+
+/**
+ * Builds the on-chain payload for staking with an optional memo.
+ * The memo is a hex-encoded Bytes payload bound to the vault funding
+ * event for off-chain correlation (e.g. tx idempotency key).
+ *
+ * Throws MemoTooLongError if the decoded memo exceeds MEMO_MAX_BYTES.
+ */
+export const buildVaultStakeWithMemoPayload = async (
+  input: StakeWithMemoInput,
+): Promise<StakeWithMemoResponse> => {
+  const mode = input.onChain?.mode ?? 'build'
+  const payload = buildStakeWithMemoPayload(input)
+
+  if (mode !== 'submit') {
+    return {
+      mode,
+      payload,
+      submission: { attempted: false, status: 'not_requested' },
+    }
+  }
+
+  const config = getSorobanConfig()
+  if (!config) {
+    log('warn', 'soroban.submit_not_configured', { vaultId: input.vaultId })
+    return {
+      mode,
+      payload,
+      submission: { attempted: true, status: 'not_configured' },
+    }
+  }
+
+  try {
+    log('info', 'soroban.submit_start', { vaultId: input.vaultId })
+    const { txHash } = await _client.submitStakeWithMemo(config, payload.args)
+    log('info', 'soroban.submit_success', { vaultId: input.vaultId, txHash })
+
+    return {
+      mode,
+      payload,
+      submission: { attempted: true, status: 'success', txHash },
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown submission error'
+    log('error', 'soroban.submit_error', { vaultId: input.vaultId, error: message })
+
+    return {
+      mode,
+      payload,
+      submission: { attempted: true, status: 'error', error: message },
+    }
+  }
 }
 
 // ─── Structured logging helper (no PII) ─────────────────────────────────────
