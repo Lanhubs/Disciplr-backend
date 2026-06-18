@@ -102,6 +102,7 @@ export const envSchema = z
     SOROBAN_NETWORK_PASSPHRASE: z.string().optional(),
     SOROBAN_SOURCE_ACCOUNT: z.string().optional(),
     SOROBAN_RPC_URL: httpUrl().optional(),
+    SOROBAN_RPC_URLS: z.string().optional(),
     SOROBAN_SECRET_KEY: z.string().optional(),
     SOROBAN_SUBMIT_POLL_INTERVAL_MS: positiveInt(1_000),
     SOROBAN_SUBMIT_POLL_MAX_ATTEMPTS: positiveInt(30),

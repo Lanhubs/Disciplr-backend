@@ -1,5 +1,6 @@
 import type { CreateVaultInput, PersistedVault, VaultCreateResponse } from '../types/vaults.js'
 import { retryWithBackoff, sleep, type RetryConfig } from '../utils/retry.js'
+import { AppError } from '../middleware/errorHandler.js'
 
 const DEFAULT_CONTRACT_ID = 'CONTRACT_ID_NOT_CONFIGURED'
 const DEFAULT_SOURCE_ACCOUNT = 'SOURCE_ACCOUNT_NOT_CONFIGURED'
@@ -18,7 +19,8 @@ export interface SorobanConfig {
   contractId: string
   networkPassphrase: string
   sourceAccount: string
-  rpcUrl: string
+  rpcUrls: string[]
+  rpcUrl?: string // Backward compatibility
   secretKey: string
   submitPollIntervalMs: number
   submitPollMaxAttempts: number
@@ -50,10 +52,10 @@ export const getSorobanConfig = (): SorobanConfig | null => {
   const contractId = process.env.SOROBAN_CONTRACT_ID
   const networkPassphrase = process.env.SOROBAN_NETWORK_PASSPHRASE
   const sourceAccount = process.env.SOROBAN_SOURCE_ACCOUNT
-  const rpcUrl = process.env.SOROBAN_RPC_URL
+  const rpcUrls = (process.env.SOROBAN_RPC_URLS || process.env.SOROBAN_RPC_URL)?.split(',').map(url => url.trim()).filter(url => url.length > 0)
   const secretKey = process.env.SOROBAN_SECRET_KEY
 
-  if (!contractId || !networkPassphrase || !sourceAccount || !rpcUrl || !secretKey) {
+  if (!contractId || !networkPassphrase || !sourceAccount || !rpcUrls || rpcUrls.length === 0 || !secretKey) {
     return null
   }
 
@@ -61,7 +63,8 @@ export const getSorobanConfig = (): SorobanConfig | null => {
     contractId,
     networkPassphrase,
     sourceAccount,
-    rpcUrl,
+    rpcUrls,
+    rpcUrl: rpcUrls[0], // Backward compatibility
     secretKey,
     submitPollIntervalMs: positiveIntFromEnv('SOROBAN_SUBMIT_POLL_INTERVAL_MS', DEFAULT_SUBMIT_POLL_INTERVAL_MS),
     submitPollMaxAttempts: positiveIntFromEnv('SOROBAN_SUBMIT_POLL_MAX_ATTEMPTS', DEFAULT_SUBMIT_POLL_MAX_ATTEMPTS),
@@ -86,6 +89,7 @@ async function submitTransaction(
   config: SorobanConfig,
   methodName: string,
   scVals: any[],
+  loadSdk: StellarSdkLoader = () => import('@stellar/stellar-sdk'),
 ): Promise<{ txHash: string }> {
   const {
     Keypair,
@@ -94,46 +98,66 @@ async function submitTransaction(
     TransactionBuilder,
     nativeToScVal,
     BASE_FEE,
-  } = await import('@stellar/stellar-sdk')
+  } = await loadSdk()
 
-  const server = new SorobanRpc.Server(config.rpcUrl)
   const keypair = Keypair.fromSecret(config.secretKey)
-  const account = await server.getAccount(config.sourceAccount)
-
   const contract = new Contract(config.contractId)
-  const callOp = contract.call(methodName, ...scVals)
+  let lastError: Error | undefined
 
-  const tx = new TransactionBuilder(account, {
-    fee: BASE_FEE,
-    networkPassphrase: config.networkPassphrase,
-  })
-    .addOperation(callOp)
-    .setTimeout(30)
-    .build()
+  for (const rpcUrl of config.rpcUrls) {
+    try {
+      log('info', 'soroban.using_rpc', { rpcUrl })
+      const server = new SorobanRpc.Server(rpcUrl)
+      
+      // Use the existing retry logic for this specific RPC URL
+      const result = await retryRpc('submit_transaction', config, async () => {
+        const account = await server.getAccount(config.sourceAccount)
 
-  const prepared = await server.prepareTransaction(tx)
-  prepared.sign(keypair)
+        const tx = new TransactionBuilder(account, {
+          fee: BASE_FEE,
+          networkPassphrase: config.networkPassphrase,
+        })
+          .addOperation(contract.call(methodName, ...scVals))
+          .setTimeout(30)
+          .build()
 
-  const response = await server.sendTransaction(prepared)
+        const prepared = await server.prepareTransaction(tx)
+        prepared.sign(keypair)
 
-  if (response.status === 'ERROR') {
-    throw new Error(`Soroban sendTransaction failed: ${response.status}`)
+        const response = await server.sendTransaction(prepared)
+
+        if (response.status === 'ERROR') {
+          throw new Error(`Soroban sendTransaction failed: ${response.status}`)
+        }
+
+        let getResponse = await server.getTransaction(response.hash)
+        const maxAttempts = config.submitPollMaxAttempts || 30
+        let attempts = 0
+        while (getResponse.status === 'NOT_FOUND' && attempts < maxAttempts) {
+          await sleep(config.submitPollIntervalMs || 1000)
+          getResponse = await server.getTransaction(response.hash)
+          attempts++
+        }
+
+        if (getResponse.status !== 'SUCCESS') {
+          throw new Error(`Soroban transaction did not succeed: ${getResponse.status}`)
+        }
+
+        return { txHash: response.hash }
+      })
+
+      return result
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err))
+      lastError = error
+      log('warn', 'soroban.rpc_failed', { rpcUrl, error: error.message })
+      if (!isRetryableSorobanRpcError(error)) {
+        throw error
+      }
+    }
   }
 
-  let getResponse = await server.getTransaction(response.hash)
-  const maxAttempts = 30
-  let attempts = 0
-  while (getResponse.status === 'NOT_FOUND' && attempts < maxAttempts) {
-    await new Promise((r) => setTimeout(r, 1000))
-    getResponse = await server.getTransaction(response.hash)
-    attempts++
-  }
-
-  if (getResponse.status !== 'SUCCESS') {
-    throw new Error(`Soroban transaction did not succeed: ${getResponse.status}`)
-  }
-
-  return { txHash: response.hash }
+  throw lastError || new Error('All RPC nodes failed')
 }
 
 // ─── Soroban SDK abstraction (mockable for tests) ───────────────────────────
@@ -233,7 +257,7 @@ export const createDefaultSorobanClient = (
   loadSdk: StellarSdkLoader = () => import('@stellar/stellar-sdk'),
 ): SorobanClient => ({
   async submitVaultCreation(config, args) {
-    const { nativeToScVal } = await import('@stellar/stellar-sdk')
+    const { nativeToScVal } = await loadSdk()
     return submitTransaction(
       config,
       'create_vault',
@@ -244,11 +268,12 @@ export const createDefaultSorobanClient = (
         nativeToScVal(args.successDestination, { type: 'string' }),
         nativeToScVal(args.failureDestination, { type: 'string' }),
       ],
+      loadSdk,
     )
   },
 
   async submitStake(config, args) {
-    const { nativeToScVal } = await import('@stellar/stellar-sdk')
+    const { nativeToScVal } = await loadSdk()
     return submitTransaction(
       config,
       'stake',
@@ -256,11 +281,12 @@ export const createDefaultSorobanClient = (
         nativeToScVal(args.vaultId, { type: 'string' }),
         nativeToScVal(args.amount, { type: 'string' }),
       ],
+      loadSdk,
     )
   },
 
   async submitCheckIn(config, args) {
-    const { nativeToScVal, xdr } = await import('@stellar/stellar-sdk')
+    const { nativeToScVal, xdr } = await loadSdk()
     // evidence_hash is a 32-byte Buffer encoded as hex string from the backend.
     const hashHex = args.evidenceHash as string
     const hashBytes = Buffer.from(hashHex, 'hex')
@@ -273,11 +299,12 @@ export const createDefaultSorobanClient = (
         nativeToScVal(args.milestoneId, { type: 'string' }),
         evidenceHashScVal,
       ],
+      loadSdk,
     )
   },
 
   async submitSlash(config, args) {
-    const { nativeToScVal } = await import('@stellar/stellar-sdk')
+    const { nativeToScVal } = await loadSdk()
     return submitTransaction(
       config,
       'slash_on_miss',
@@ -285,24 +312,27 @@ export const createDefaultSorobanClient = (
         nativeToScVal(args.vaultId, { type: 'string' }),
         nativeToScVal(args.milestoneId, { type: 'string' }),
       ],
+      loadSdk,
     )
   },
 
   async submitClaim(config, args) {
-    const { nativeToScVal } = await import('@stellar/stellar-sdk')
+    const { nativeToScVal } = await loadSdk()
     return submitTransaction(
       config,
       'claim',
       [nativeToScVal(args.vaultId, { type: 'string' })],
+      loadSdk,
     )
   },
 
   async submitWithdraw(config, args) {
-    const { nativeToScVal } = await import('@stellar/stellar-sdk')
+    const { nativeToScVal } = await loadSdk()
     return submitTransaction(
       config,
       'withdraw',
       [nativeToScVal(args.vaultId, { type: 'string' })],
+      loadSdk,
     )
   },
 })
