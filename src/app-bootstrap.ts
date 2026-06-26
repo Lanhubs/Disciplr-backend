@@ -22,6 +22,7 @@ import { adminVerifiersRouter } from './routes/adminVerifiers.js'
 import { verificationsRouter } from './routes/verifications.js'
 import { apiKeysRouter } from './routes/apiKeys.js'
 import { notificationsRouter } from './routes/notifications.js'
+import { webhooksRouter } from './routes/webhooks.js'
 import { createNotificationService, NotificationService } from './services/notifications/factory.js'
 import { withRequestPrisma } from './middleware/withRequestPrisma.js'
 import {
@@ -65,6 +66,7 @@ export function bootstrapApp(options: BootstrapOptions = {}) {
   app.use('/api/verifications', verificationsRouter)
   app.use('/api/api-keys', apiKeysRouter)
   app.use('/api/notifications', notificationsRouter)
+  app.use('/api/webhooks', webhooksRouter)
 
   // Catch-all 404 and uniform error shape – must be registered after all routes.
   app.use(notFound)
