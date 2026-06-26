@@ -218,6 +218,19 @@ All environment variables are validated at startup using `src/config/env.ts`. If
 | `HTTP_HEADERS_TIMEOUT_MS`    | 61,000  | HTTP headers deadline timeout (milliseconds). Must be less than `HTTP_REQUEST_TIMEOUT_MS`. Set slightly above ALB idle timeout (60s). |
 | `HTTP_REQUEST_TIMEOUT_MS`    | 120,000 | Full request lifecycle timeout (milliseconds). Protects against stalled request bodies.                                               |
 
+## Rate Limiting
+
+Disciplr-backend implements rate limiting (e.g. for API keys, organization reads/writes, and endpoints).
+When `REDIS_URL` is configured, it uses a Redis-backed distributed token bucket to enforce these limits globally across all running backend replicas.
+
+### Fail-Open Semantics
+
+The distributed rate limiter is designed to **fail open**. If the Redis server is unreachable, or if an individual command fails (e.g., due to an intermittent network error), the rate limiter will log a warning and allow the request to proceed. 
+
+This fail-open behavior ensures that the API remains available to users even if the rate-limiting infrastructure experiences degradation, prioritizing uptime over strict abuse prevention during an outage. Unreachable Redis incidents are logged as `[RATE_LIMIT_STORE_ERROR]` with the underlying exception details.
+
+If `REDIS_URL` is not provided, the server falls back to the in-memory store for rate limiting (which is limited to per-replica boundaries).
+
 ## Structured Abuse Category Taxonomy (#467)
 
 The abuse monitor now emits structured `security.abuse_detected` events instead of free-form strings, enabling downstream aggregation by anomaly class.
