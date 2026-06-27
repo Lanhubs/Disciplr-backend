@@ -178,6 +178,7 @@ export class BackgroundJobSystem {
     this.queue.registerHandler('analytics.recompute', handlers['analytics.recompute'])
     this.queue.registerHandler('export.generate', handlers['export.generate'])
     this.queue.registerHandler('sessions.cleanup', handlers['sessions.cleanup'])
+    this.queue.registerHandler('outbox.relay', handlers['outbox.relay'])
   }
 
   start(): void {
@@ -257,6 +258,10 @@ export class BackgroundJobSystem {
       process.env.SESSIONS_CLEANUP_INTERVAL_MS,
       86_400_000, // 24 hours
     )
+    const outboxRelayIntervalMs = parsePositiveInteger(
+      process.env.OUTBOX_RELAY_INTERVAL_MS,
+      5_000,
+    )
 
     this.schedulerRegistry.registerJob({
       name: 'deadline.check',
@@ -287,6 +292,16 @@ export class BackgroundJobSystem {
       initialDelayMs: 10_000,
       execute: () => {
         this.enqueue('sessions.cleanup', {})
+      },
+    })
+
+    this.schedulerRegistry.registerJob({
+      name: 'outbox.relay',
+      intervalMs: outboxRelayIntervalMs,
+      immediate: true,
+      initialDelayMs: 1_000,
+      execute: () => {
+        this.enqueue('outbox.relay', {})
       },
     })
   }

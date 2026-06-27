@@ -6,6 +6,7 @@ export const JOB_TYPES = [
   'analytics.recompute',
   'export.generate',
   'sessions.cleanup',
+  'outbox.relay',
 ] as const
 
 export type JobType = (typeof JOB_TYPES)[number]
@@ -47,6 +48,8 @@ export interface SessionsCleanupJobPayload {
   batchSize?: number
 }
 
+export interface OutboxRelayJobPayload {}
+
 export interface JobPayloadByType {
   'notification.send': NotificationJobPayload
   'deadline.check': DeadlineCheckJobPayload
@@ -55,6 +58,7 @@ export interface JobPayloadByType {
   'analytics.recompute': AnalyticsRecomputeJobPayload
   'export.generate': ExportGenerateJobPayload
   'sessions.cleanup': SessionsCleanupJobPayload
+  'outbox.relay': OutboxRelayJobPayload
 }
 
 export interface JobContext {
@@ -134,6 +138,8 @@ export const isPayloadForJobType = (
       return isNonEmptyString(payload.exportJobId)
     case 'sessions.cleanup':
       return payload.batchSize === undefined || (typeof payload.batchSize === 'number' && payload.batchSize > 0)
+    case 'outbox.relay':
+      return true
     default:
       return false
   }

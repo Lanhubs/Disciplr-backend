@@ -4,6 +4,7 @@ import type { JobHandler, JobType } from './types.js'
 import { markVaultExpiries, sendMilestoneReminders } from '../services/vaultExpiry.service.js'
 import { cleanupExpiredSessions } from '../services/session.js'
 import { buildSlashOnMissPayload } from '../services/soroban.js'
+import { relayOutboxBatch } from '../services/outboxRelay.js'
 
 type JobHandlerRegistry = {
   [K in JobType]: JobHandler<K>
@@ -83,6 +84,13 @@ export const createDefaultJobHandlers = (
     logJob(
       'sessions.cleanup',
       `deleted=${deleted} batchSize=${batchSize} attempt=${context.attempt}`,
+    )
+  },
+  'outbox.relay': async (payload, context) => {
+    const count = await relayOutboxBatch()
+    logJob(
+      'outbox.relay',
+      `relayed=${count} attempt=${context.attempt}`,
     )
   },
 })
