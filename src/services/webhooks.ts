@@ -21,6 +21,18 @@ export interface WebhookSubscriber {
   organizationId: string
   url: string
   secret: string
+  /**
+   * The previous signing secret retained during the rotation grace window.
+   * Null when no rotation has occurred or after the grace window has closed
+   * and the column has been cleared.
+   */
+  previousSecret: string | null
+  /**
+   * ISO 8601 timestamp of when the most recent secret rotation occurred.
+   * Used together with WEBHOOK_SECRET_GRACE_WINDOW_MS to determine whether
+   * the previous secret is still valid for verifying inbound signatures.
+   */
+  rotatedAt: string | null
   events: string[]
   active: boolean
   createdAt: string
@@ -137,6 +149,27 @@ export const verifySignature = (secret: string, body: string, signature: string)
   return timingSafeEqual(Buffer.from(expected, 'utf8'), Buffer.from(signature, 'utf8'))
 }
 
+/**
+ * Verifies a signature against a subscriber's current secret and, when within
+ * the rotation grace window, also against the previous secret.
+ *
+ * This lets subscribers that have not yet updated their secret still pass
+ * verification until the grace window closes.
+ *
+ * Returns `true` if at least one of the valid secrets matches.
+ */
+export const verifySignatureWithGrace = (
+  subscriber: WebhookSubscriber,
+  body: string,
+  signature: string,
+): boolean => {
+  if (verifySignature(subscriber.secret, body, signature)) return true
+  if (isPreviousSecretInGrace(subscriber)) {
+    return verifySignature(subscriber.previousSecret!, body, signature)
+  }
+  return false
+}
+
 export const addSubscriber = async (
   organizationId: string,
   url: string,
@@ -148,6 +181,68 @@ export const addSubscriber = async (
   }
 
   return repo.create({ organizationId, url, secret, events })
+}
+
+/**
+ * Idempotent variant of addSubscriber.
+ *
+ * Re-registering the same (org, URL) pair updates the existing row in-place
+ * instead of inserting a duplicate.  Delivery history (dead letters keyed on
+ * subscriber_id) is preserved because the row's primary key does not change.
+ */
+export const upsertSubscriber = async (
+  organizationId: string,
+  url: string,
+  secret: string,
+  events: string[],
+): Promise<WebhookSubscriber> => {
+  if (!isUrlAllowed(url)) {
+    throw new Error(`Webhook URL not permitted: ${url}`)
+  }
+
+  return repo.upsert({ organizationId, url, secret, events })
+}
+
+/**
+ * Rotates the signing secret for a subscriber.
+ *
+ * The previous secret is stored alongside the new one for
+ * WEBHOOK_SECRET_GRACE_WINDOW_MS milliseconds (default 24 h) so any
+ * in-flight deliveries signed with the old key continue to verify.
+ *
+ * Returns null when the subscriber does not exist or belongs to a different
+ * organization.
+ */
+export const rotateSubscriberSecret = async (
+  id: string,
+  organizationId: string,
+  newSecret: string,
+): Promise<WebhookSubscriber | null> => {
+  return repo.rotateSecret(id, organizationId, newSecret)
+}
+
+/**
+ * Default grace window: 24 hours. Override via WEBHOOK_SECRET_GRACE_WINDOW_MS.
+ */
+const DEFAULT_GRACE_WINDOW_MS = 24 * 60 * 60 * 1000
+
+export const getGraceWindowMs = (): number => {
+  const raw = process.env.WEBHOOK_SECRET_GRACE_WINDOW_MS
+  if (raw) {
+    const parsed = parseInt(raw, 10)
+    if (!Number.isNaN(parsed) && parsed >= 0) return parsed
+  }
+  return DEFAULT_GRACE_WINDOW_MS
+}
+
+/**
+ * Returns true if the previous secret for a subscriber is still within its
+ * rotation grace window (i.e. it should still be accepted for verification).
+ */
+export const isPreviousSecretInGrace = (subscriber: WebhookSubscriber): boolean => {
+  if (!subscriber.previousSecret || !subscriber.rotatedAt) return false
+  const rotatedAt = new Date(subscriber.rotatedAt).getTime()
+  return Date.now() - rotatedAt < getGraceWindowMs()
 }
 
 export const removeSubscriber = async (id: string): Promise<boolean> => repo.remove(id)

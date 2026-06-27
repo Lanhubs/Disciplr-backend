@@ -34,6 +34,8 @@ jest.unstable_mockModule('../repositories/webhookSubscriberRepository.js', () =>
           organizationId: data.organizationId,
           url: data.url,
           secret: data.secret,
+          previousSecret: null,
+          rotatedAt: null,
           events: [...data.events],
           active: true,
           createdAt: new Date().toISOString(),

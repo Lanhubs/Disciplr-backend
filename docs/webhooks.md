@@ -107,13 +107,15 @@ Webhook subscribers are stored in the `webhook_subscribers` table:
 | `id` | `uuid` (PK, auto-generated) | Unique subscriber identifier |
 | `organization_id` | `varchar(255)` | Owning organization (NOT NULL) |
 | `url` | `varchar(2048)` | Target webhook URL |
-| `secret` | `text` | HMAC signing secret |
+| `secret` | `text` | Current HMAC signing secret |
+| `previous_secret` | `text` (nullable) | Previous secret retained during rotation grace window |
+| `rotated_at` | `timestamptz` (nullable) | When the most recent rotation occurred |
 | `events` | `jsonb` | Array of event types to receive; empty array = wildcard (all events) |
 | `active` | `boolean` | Whether the subscriber is active |
 | `created_at` | `timestamptz` | Creation timestamp |
 | `updated_at` | `timestamptz` | Last update timestamp |
 
-Index: `(organization_id, active)` for efficient org-scoped lookups.
+Unique constraint: `(organization_id, url)` — only one active subscriber per org/URL pair.
 
 ## Secret Handling Decision
 
@@ -135,17 +137,129 @@ All subscriber queries are scoped by `organization_id`. When dispatching events,
 
 Creates a new webhook subscriber. The URL is validated against the SSRF allowlist (`isUrlAllowed`). Returns the created subscriber.
 
+### `upsertSubscriber(organizationId, url, secret, events)`
+
+Idempotent alternative to `addSubscriber`. Re-registering the same `(organizationId, url)` pair updates the existing row in-place — no duplicate rows are created and delivery history (dead-letter entries keyed on the subscriber id) is preserved. The upsert is scoped to the calling org so a cross-org overwrite is impossible.
+
+### `rotateSubscriberSecret(id, organizationId, newSecret)`
+
+Rotates the signing secret for a subscriber:
+
+1. The current `secret` is moved to `previous_secret`.
+2. `newSecret` becomes the active `secret`.
+3. `rotated_at` is stamped to `now()`.
+
+The `previousSecret` remains valid for signature verification for the duration of the **grace window** (env `WEBHOOK_SECRET_GRACE_WINDOW_MS`, default **24 hours**). This lets receivers that haven't yet updated their expected secret continue to verify in-flight deliveries without interruption.
+
+Returns `null` when the subscriber does not exist or the `organizationId` does not match (cross-org rotation is silently rejected to avoid enumeration).
+
+### `verifySignatureWithGrace(subscriber, body, signature)`
+
+Verifies a signature against a subscriber's **current** secret and, if within the grace window, also against the **previous** secret. Returns `true` if either matches. Use this instead of bare `verifySignature` wherever subscriber-scoped verification is needed (e.g., inbound callbacks that embed a subscriber ID).
+
+### `isPreviousSecretInGrace(subscriber)`
+
+Returns `true` when `previousSecret` is set and `Date.now() - rotatedAt < graceWindowMs`.
+
 ### `removeSubscriber(id)`
 
 Deletes a subscriber by ID. Returns `true` if found.
 
 ### `listSubscribers(organizationId)`
 
-Returns all active subscribers for an organization.
+Returns all active subscribers for an organization. **Secret material is never included in list responses.**
 
 ### `dispatchWebhookEvent(payload)`
 
-Delivers an event to all eligible active subscribers for the organization specified in `payload.organizationId`. Uses exponential-backoff retry (max 3 attempts). Failures are collected per-subscriber.
+Delivers an event to all eligible active subscribers for the organization specified in `payload.organizationId`. Outbound deliveries are always signed with the **current** secret. Uses exponential-backoff retry (max 3 attempts). Failures are collected per-subscriber.
+
+---
+
+## Secret Rotation Flow
+
+```
+Operator                      Disciplr API                  Subscriber
+   |                               |                              |
+   |-- POST /rotate-secret ------->|                              |
+   |   { new_secret: "v2" }        |                              |
+   |<-- 200 { rotated_at }---------|                              |
+   |                               |                              |
+   |                               |-- deliver (signed w/ v2) --->|
+   |                               |   (subscriber may still      |
+   |                               |    verify with v1 during     |
+   |                               |    grace window)             |
+   |   [ grace window: 24 h ]      |                              |
+   |                               |                              |
+   |   Subscriber updates its      |                              |
+   |   expected secret to v2       |                              |
+   |                               |-- deliver (signed w/ v2) --->|
+   |                               |   (subscriber now verifies   |
+   |                               |    with v2 exclusively)      |
+```
+
+Key properties:
+- Outbound deliveries are **always signed with the current (new) secret** immediately after rotation.
+- The previous secret is retained server-side for the grace window so receivers don't need to update instantaneously.
+- After the grace window closes, `verifySignatureWithGrace` only accepts the current secret.
+- Operators can tune the overlap duration via `WEBHOOK_SECRET_GRACE_WINDOW_MS`.
+
+---
+
+## Admin API Endpoints
+
+### `POST /api/admin/webhooks/subscribers`
+
+Idempotent upsert. Creates or updates a subscriber for the given `(organization_id, url)` pair.
+
+**Body:**
+```json
+{
+  "organization_id": "org-123",
+  "url": "https://hooks.example.com/disciplr",
+  "secret": "my-signing-secret",
+  "events": ["vault_created", "vault_completed"]
+}
+```
+
+**Response 200:**
+```json
+{
+  "id": "uuid",
+  "organization_id": "org-123",
+  "url": "https://hooks.example.com/disciplr",
+  "events": ["vault_created", "vault_completed"],
+  "active": true,
+  "created_at": "2026-06-27T13:00:00.000Z"
+}
+```
+
+The secret is **never returned** in any response.
+
+### `GET /api/admin/webhooks/subscribers?organization_id=<org>`
+
+Lists active subscribers for an organization. Secret material is stripped.
+
+### `POST /api/admin/webhooks/subscribers/:id/rotate-secret`
+
+Rotates the signing secret. Previous secret is preserved in the grace window.
+
+**Body:**
+```json
+{
+  "organization_id": "org-123",
+  "new_secret": "my-new-signing-secret"
+}
+```
+
+**Response 200:**
+```json
+{
+  "id": "uuid",
+  "rotated_at": "2026-06-27T14:00:00.000Z"
+}
+```
+
+**Response 404** – subscriber not found or belongs to a different org (identical to avoid enumeration).
 
 ---
 
