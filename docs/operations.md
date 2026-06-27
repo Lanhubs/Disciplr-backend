@@ -2,6 +2,10 @@
 
 This document describes how to manage the Disciplr-backend service in production.
 
+## Disaster recovery
+
+The disaster-recovery runbook lives in [runbooks/disaster-recovery.md](runbooks/disaster-recovery.md) and covers backup cadence, restore steps, Horizon replay guidance, secret/key recovery, and the quarterly restore-drill checklist.
+
 ## Graceful Shutdown
 
 Disciplr-backend implements a graceful shutdown procedure to ensure that no data is lost and all resources are cleaned up correctly.
