@@ -3,6 +3,10 @@ import { processJob as processExportJob } from '../services/exportQueue.js'
 import type { JobHandler, JobType } from './types.js'
 import { markVaultExpiries } from '../services/vault.js'
 import { TransactionETLService } from '../services/transactionETL.js'
+import { MilestoneEmbeddingSource, ReindexCursorStore } from '../services/evidenceReindex.js'
+import { EmbeddingProvider } from '../services/embeddingProvider.js'
+import { buildSlashOnMissPayload } from '../services/soroban.js'
+import { sendMilestoneReminders } from '../services/vaultExpiry.service.js'
 
 type JobHandlerRegistry = {
   [K in JobType]: JobHandler<K>
@@ -83,7 +87,7 @@ export const createDefaultJobHandlers = (
       `exportJobId=${payload.exportJobId} attempt=${context.attempt}`,
     )
   },
-`  'vault.reconcile': async (payload, context) => {
+  'vault.reconcile': async (payload, context) => {
     const etlConfig = {
       horizonUrl: process.env.HORIZON_URL || 'https://horizon-testnet.stellar.org',
       networkPassphrase: process.env.STELLAR_NETWORK_PASSPHRASE || 'Test SDF Network ; September 2015',
@@ -100,7 +104,6 @@ export const createDefaultJobHandlers = (
       `vaultIds=${payload.vaultIds?.length || 'all'} batchSize=${payload.batchSize || 50} checked=${result.checked}/${result.totalVaults} drift=${result.driftDetected} missing=${result.missingOnChain} errors=${result.errors} attempt=${context.attempt}`,
     )
   },
-}
   'sessions.cleanup': async (payload, context) => {
     const batchSize = payload.batchSize ?? 1000
     const deleted = await cleanupExpiredSessions(batchSize)
